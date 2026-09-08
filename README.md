@@ -128,7 +128,7 @@ GitHub Webhook
 
 生产部署前，建议创建一个无敏感信息的测试 PR，确认 Webhook 返回 `202`，并确认 PR 评论只出现一条。
 
-## 用户能感知的功能
+## 功能
 
 ### Pull Request Review
 
