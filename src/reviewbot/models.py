@@ -8,6 +8,7 @@ Priority = Literal["P0", "P1", "P2", "P3"]
 ReviewVerdict = Literal["clean", "needs_attention"]
 EventState = Literal["queued", "running", "succeeded", "failed", "skipped", "superseded"]
 EventSource = Literal["webhook", "refresh", "replay", "manual"]
+FindingStatus = Literal["new", "active", "resolved", "relocated"]
 
 
 class PullRequest(BaseModel):
@@ -100,6 +101,24 @@ class ReviewRecord(BaseModel):
     comment_id: int | None = None
     created_at: str
 
+
+class FindingRecord(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    fingerprint: str
+    repository: str
+    pull_request_number: int = Field(gt=0)
+    head_sha: str
+    path: str = Field(min_length=1)
+    line: int = Field(gt=0)
+    end_line: int | None = Field(default=None, gt=0)
+    priority: Priority
+    title: str = Field(min_length=1, max_length=180)
+    status: FindingStatus
+    first_seen_sha: str
+    last_seen_sha: str
+    created_at: str
+    updated_at: str
 
 class ReviewJob(BaseModel):
     model_config = ConfigDict(frozen=True)

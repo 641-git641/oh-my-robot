@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from reviewbot.models import ReviewJob
+from reviewbot.models import ReviewFinding, ReviewJob
 from reviewbot.storage import QueueStore
 
 
@@ -312,3 +312,102 @@ def test_complete_review_clears_retry_error_category(tmp_path: Path) -> None:
     event = store.get_event("delivery-retry")
     assert event is not None
     assert event.error_type is None
+
+
+def test_finding_lifecycle_tracks_new_active_relocated_and_resolved(tmp_path: Path) -> None:
+    store = QueueStore(tmp_path / "findings.sqlite3")
+    store.initialize()
+
+    def complete(
+        delivery_id: str,
+        head_sha: str,
+        findings: list[ReviewFinding],
+        *,
+        reviewed_paths: frozenset[str] | None = None,
+    ) -> None:
+        job = _job(delivery_id)
+        job = job.model_copy(update={"webhook_head_sha": head_sha})
+        assert store.enqueue(job)
+        assert store.claim_next() is not None
+        store.complete_review(
+            delivery_id,
+            "owner/repo",
+            1,
+            head_sha,
+            1,
+            diff_file_count=1,
+            diff_bytes=10,
+            omitted_file_count=0,
+            model_input_tokens=None,
+            model_output_tokens=None,
+            finding_count=len(findings),
+            review_rank="P1",
+            model_duration_ms=1,
+            github_duration_ms=1,
+            findings=findings,
+            reviewed_paths=reviewed_paths,
+        )
+
+    def finding(line: int) -> ReviewFinding:
+        return ReviewFinding(
+            priority="P1",
+            path="src/auth.py",
+            line=line,
+            symbol="login",
+            title="Missing authorization",
+            problem="A caller can reach the handler without a permission check.",
+            impact="Unauthorized users can access the operation.",
+            suggestion="Require the permission before dispatch.",
+            confidence=0.95,
+        )
+
+    complete("finding-1", "head-1", [finding(10)])
+    first = store.list_findings(repository="owner/repo", pull_request_number=1)
+    assert len(first) == 1
+    assert first[0].status == "new"
+    assert first[0].first_seen_sha == "head-1"
+
+    complete("finding-2", "head-2", [], reviewed_paths=frozenset({"src/other.py"}))
+    assert store.list_findings(repository="owner/repo", status="new")[0].status == "new"
+
+    complete("finding-3", "head-3", [finding(10)])
+    assert store.list_findings(repository="owner/repo", status="active")[0].status == "active"
+
+    complete("finding-4", "head-4", [finding(20)])
+    assert store.list_findings(repository="owner/repo", status="relocated")[0].line == 20
+
+    complete("finding-5", "head-5", [])
+    resolved = store.list_findings(repository="owner/repo", status="resolved")
+    assert len(resolved) == 1
+    assert resolved[0].last_seen_sha == "head-5"
+
+
+def test_store_persists_omp_session_and_safe_tool_audit(tmp_path: Path) -> None:
+    database_path = tmp_path / "omp.sqlite3"
+    store = QueueStore(database_path)
+    store.initialize()
+    store.record_omp_execution(
+        "omp-delivery",
+        "owner/repo",
+        1,
+        "head-1",
+        "session-1",
+        (
+            {"event": "start", "tool": "read", "tool_call_id": "call-1", "args": "secret"},
+            {"event": "end", "tool": "read", "tool_call_id": "call-1", "is_error": False},
+            {"event": "ignored", "tool": "write"},
+        ),
+    )
+
+    with sqlite3.connect(database_path) as connection:
+        session = connection.execute(
+            "SELECT session_id, state FROM omp_sessions WHERE delivery_id = ?",
+            ("omp-delivery",),
+        ).fetchone()
+        audit = connection.execute(
+            "SELECT event, tool_name, is_error FROM omp_tool_audit WHERE delivery_id = ? ORDER BY id",
+            ("omp-delivery",),
+        ).fetchall()
+
+    assert session == ("session-1", "completed")
+    assert audit == [("start", "read", 0), ("end", "read", 0)]

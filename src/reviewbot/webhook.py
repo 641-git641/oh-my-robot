@@ -16,6 +16,14 @@ REVIEW_ACTIONS = frozenset(
         "synchronize",
     }
 )
+INTERACTION_EVENTS = frozenset(
+    {
+        "issue_comment",
+        "issues",
+        "pull_request_review",
+        "pull_request_review_comment",
+    }
+)
 
 
 class WebhookError(ValueError):
@@ -66,6 +74,10 @@ def is_pull_request_event(event_type: str, payload: Mapping[str, Any]) -> bool:
     del payload
     normalized = event_type.strip().lower().replace("-", "_").replace(" ", "_")
     return normalized == "pull_request"
+
+def is_interaction_event(event_type: str) -> bool:
+    normalized = event_type.strip().lower().replace("-", "_").replace(" ", "_")
+    return normalized in INTERACTION_EVENTS
 
 
 def is_review_action(action: str) -> bool:

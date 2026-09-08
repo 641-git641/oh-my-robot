@@ -10,6 +10,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./review-rules.md:/app/review-rules.md:ro
+      - ./review-rules.toml:/app/review-rules.toml:ro
     security_opt:
       - no-new-privileges:true
     cap_drop:

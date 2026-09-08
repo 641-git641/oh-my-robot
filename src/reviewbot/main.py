@@ -7,6 +7,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request, status
 
 from reviewbot.admin import register_admin_routes
@@ -18,7 +19,14 @@ from reviewbot.omp_worker import OmpReadOnlyReviewer
 from reviewbot.reviewer import ReviewEngine
 from reviewbot.service import ReviewService
 from reviewbot.storage import QueueStore
-from reviewbot.webhook import WebhookError, is_pull_request_event, is_review_action, parse_review_job, verify_webhook
+from reviewbot.webhook import (
+    WebhookError,
+    is_interaction_event,
+    is_pull_request_event,
+    is_review_action,
+    parse_review_job,
+    verify_webhook,
+)
 from reviewbot.worker import WorkerPool
 
 log = logging.getLogger(__name__)
@@ -30,6 +38,7 @@ def create_app(
     github_client: GitHubClient | None = None,
     engine: ReviewEngine | None = None,
     store: QueueStore | None = None,
+    roboomp_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     runtime = settings or get_settings()
     runtime.validate_runtime()
@@ -68,11 +77,17 @@ def create_app(
         deep_reviewer=deep_reviewer,
         review_mode=runtime.review_mode,
         rule_file=runtime.review_rule_file,
+        path_rule_file=runtime.review_path_rule_file,
         max_diff_bytes=runtime.max_diff_bytes,
         max_review_bytes=runtime.max_review_bytes,
         allowlist=runtime.repo_allowlist,
         enabled=runtime.review_enabled,
     )
+    forward_roboomp = roboomp_client
+    owns_roboomp_client = False
+    if forward_roboomp is None and runtime.roboomp_webhook_url is not None:
+        forward_roboomp = httpx.AsyncClient(timeout=runtime.roboomp_timeout_seconds)
+        owns_roboomp_client = True
     worker = WorkerPool(store=queue_store, service=service, settings=runtime)
     stop_event = asyncio.Event()
 
@@ -94,6 +109,8 @@ def create_app(
                     await result
             if deepseek is not None:
                 await deepseek.close()
+            if owns_roboomp_client and forward_roboomp is not None:
+                await forward_roboomp.aclose()
             app.state.ready = False
 
     app = FastAPI(title="oh-my-robot", version="0.1.0", lifespan=lifespan)
@@ -142,6 +159,25 @@ def create_app(
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid webhook signature")
 
         payload = _json_object(body)
+        if is_interaction_event(event_type):
+            if runtime.roboomp_webhook_url is None or forward_roboomp is None:
+                log.info(
+                    "webhook_skipped",
+                    extra={
+                        "delivery_id": delivery_id,
+                        "event_type": event_type,
+                        "reason": "roboomp_forwarding_not_configured",
+                    },
+                )
+                return {"state": "skipped", "reason": "roboomp forwarding not configured"}
+            return await _forward_interaction_event(
+                client=forward_roboomp,
+                target=str(runtime.roboomp_webhook_url),
+                body=body,
+                delivery_id=delivery_id,
+                event_type=event_type,
+                signature_header=signature_header,
+            )
         if not is_pull_request_event(event_type, payload):
             log.info(
                 "webhook_skipped",
@@ -199,6 +235,43 @@ def create_app(
         return {"state": "queued" if inserted else "duplicate", "deliveryId": job.delivery_id}
 
     return app
+
+
+async def _forward_interaction_event(
+    *,
+    client: httpx.AsyncClient,
+    target: str,
+    body: bytes,
+    delivery_id: str,
+    event_type: str,
+    signature_header: str | None,
+) -> dict[str, Any]:
+    headers = {
+        "Content-Type": "application/json",
+        "X-GitHub-Delivery": delivery_id,
+        "X-GitHub-Event": event_type,
+    }
+    if signature_header:
+        headers["X-Hub-Signature-256"] = signature_header
+    try:
+        response = await client.post(target, content=body, headers=headers)
+    except httpx.HTTPError as exc:
+        log.error(
+            "roboomp_forward_failed",
+            extra={"delivery_id": delivery_id, "event_type": event_type, "error_type": exc.__class__.__name__},
+        )
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "roboomp forwarding failed") from exc
+    if not 200 <= response.status_code < 300:
+        log.error(
+            "roboomp_forward_rejected",
+            extra={
+                "delivery_id": delivery_id,
+                "event_type": event_type,
+                "http_status": response.status_code,
+            },
+        )
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "roboomp rejected the webhook")
+    return {"state": "forwarded", "target": "roboomp", "deliveryId": delivery_id}
 
 
 def _json_object(body: bytes) -> dict[str, Any]:

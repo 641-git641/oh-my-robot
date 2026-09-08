@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from reviewbot.models import EventRecord, EventSource, EventState, ReviewJob, ReviewRecord
+from reviewbot.findings import finding_fingerprint
+from reviewbot.models import (
+    EventRecord,
+    EventSource,
+    EventState,
+    FindingRecord,
+    FindingStatus,
+    ReviewFinding,
+    ReviewJob,
+    ReviewRecord,
+)
 
 _SCHEMA_VERSION = 1
 _EVENT_SOURCES = frozenset({"webhook", "refresh", "replay", "manual"})
@@ -377,6 +387,50 @@ class QueueStore:
                 ),
             )
 
+    def record_omp_execution(
+        self,
+        delivery_id: str,
+        repository: str,
+        number: int,
+        head_sha: str,
+        session_id: str,
+        tool_audit: Sequence[Mapping[str, object]],
+    ) -> None:
+        normalized_repository = repository.lower()
+        bounded_session_id = session_id[:200]
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO omp_sessions (
+                    delivery_id, repository, pull_request_number, head_sha,
+                    session_id, state
+                ) VALUES (?, ?, ?, ?, ?, 'completed')
+                """,
+                (delivery_id, normalized_repository, number, head_sha, bounded_session_id),
+            )
+            rows: list[tuple[str, str, str, str, int]] = []
+            for item in tool_audit:
+                event = str(item.get("event", "unknown"))
+                if event not in {"start", "end"}:
+                    continue
+                rows.append(
+                    (
+                        delivery_id,
+                        bounded_session_id,
+                        event,
+                        str(item.get("tool", "unknown"))[:200],
+                        int(bool(item.get("is_error", False))),
+                    )
+                )
+            connection.executemany(
+                """
+                INSERT INTO omp_tool_audit (
+                    delivery_id, session_id, event, tool_name, is_error
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
     def complete_review(
         self,
         delivery_id: str,
@@ -394,9 +448,20 @@ class QueueStore:
         review_rank: str | None,
         model_duration_ms: float | None,
         github_duration_ms: float | None,
+        findings: Sequence[ReviewFinding] | None = None,
+        reviewed_paths: frozenset[str] | None = None,
     ) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if findings is not None:
+                self._sync_findings(
+                    connection,
+                    repository=repository,
+                    number=number,
+                    head_sha=head_sha,
+                    findings=findings,
+                    reviewed_paths=reviewed_paths,
+                )
             connection.execute(
                 """
                 INSERT OR REPLACE INTO reviews (
@@ -604,6 +669,40 @@ class QueueStore:
             ).fetchall()
             return [self._review_from_row(row) for row in rows]
 
+    def list_findings(
+        self,
+        *,
+        repository: str | None = None,
+        pull_request_number: int | None = None,
+        status: FindingStatus | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[FindingRecord]:
+        limit, offset = _page_values(limit, offset)
+        clauses = ["1 = 1"]
+        parameters: list[object] = []
+        if repository is not None:
+            clauses.append("repository = ?")
+            parameters.append(repository.lower())
+        if pull_request_number is not None:
+            clauses.append("pull_request_number = ?")
+            parameters.append(pull_request_number)
+        if status is not None:
+            clauses.append("status = ?")
+            parameters.append(status)
+        parameters.extend((limit, offset))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM findings
+                WHERE {' AND '.join(clauses)}
+                ORDER BY updated_at DESC, fingerprint
+                LIMIT ? OFFSET ?
+                """,
+                parameters,
+            ).fetchall()
+            return [self._finding_from_row(row) for row in rows]
+
     def event_state(self, delivery_id: str) -> str | None:
         event = self.get_event(delivery_id)
         return event.state if event else None
@@ -614,6 +713,104 @@ class QueueStore:
                 "SELECT state, COUNT(*) FROM events GROUP BY state"
             ).fetchall()
             return {str(state): int(count) for state, count in rows}
+
+    @staticmethod
+    def _sync_findings(
+        connection: sqlite3.Connection,
+        *,
+        repository: str,
+        number: int,
+        head_sha: str,
+        findings: Sequence[ReviewFinding],
+        reviewed_paths: frozenset[str] | None,
+    ) -> None:
+        normalized_repository = repository.lower()
+        existing_rows = connection.execute(
+            """
+            SELECT *
+            FROM findings
+            WHERE repository = ? AND pull_request_number = ?
+            """,
+            (normalized_repository, number),
+        ).fetchall()
+        existing = {str(row["fingerprint"]): row for row in existing_rows}
+        seen: set[str] = set()
+        normalized_reviewed_paths = (
+            None
+            if reviewed_paths is None
+            else {path.replace("\\", "/") for path in reviewed_paths}
+        )
+        for finding in findings:
+            fingerprint = finding_fingerprint(finding)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            previous = existing.get(fingerprint)
+            if previous is None:
+                status = "new"
+                first_seen_sha = head_sha
+            else:
+                same_location = (
+                    str(previous["path"]) == finding.path.replace("\\", "/")
+                    and int(previous["line"]) == finding.line
+                    and previous["end_line"] == finding.end_line
+                )
+                status = "active" if same_location else "relocated"
+                first_seen_sha = str(previous["first_seen_sha"])
+            connection.execute(
+                """
+                INSERT INTO findings (
+                    repository, pull_request_number, fingerprint, head_sha,
+                    path, line, end_line, priority, title, status,
+                    first_seen_sha, last_seen_sha
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(repository, pull_request_number, fingerprint) DO UPDATE SET
+                    head_sha = excluded.head_sha,
+                    path = excluded.path,
+                    line = excluded.line,
+                    end_line = excluded.end_line,
+                    priority = excluded.priority,
+                    title = excluded.title,
+                    status = excluded.status,
+                    first_seen_sha = excluded.first_seen_sha,
+                    last_seen_sha = excluded.last_seen_sha,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    normalized_repository,
+                    number,
+                    fingerprint,
+                    head_sha,
+                    finding.path.replace("\\", "/"),
+                    finding.line,
+                    finding.end_line,
+                    finding.priority,
+                    finding.title,
+                    status,
+                    first_seen_sha,
+                    head_sha,
+                ),
+            )
+        for fingerprint, previous in existing.items():
+            if (
+                fingerprint not in seen
+                and str(previous["status"]) != "resolved"
+                and (
+                    normalized_reviewed_paths is None
+                    or str(previous["path"]) in normalized_reviewed_paths
+                )
+            ):
+                connection.execute(
+                    """
+                    UPDATE findings
+                    SET status = 'resolved',
+                        head_sha = ?,
+                        last_seen_sha = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE repository = ? AND pull_request_number = ? AND fingerprint = ?
+                    """,
+                    (head_sha, head_sha, normalized_repository, number, fingerprint),
+                )
 
     def _set_event_state(self, delivery_id: str, state: EventState, error: str | None) -> None:
         with self._connect() as connection:
@@ -696,6 +893,48 @@ class QueueStore:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (repository, pull_request_number, head_sha)
             );
+            CREATE TABLE IF NOT EXISTS findings (
+                repository TEXT NOT NULL,
+                pull_request_number INTEGER NOT NULL,
+                fingerprint TEXT NOT NULL,
+                head_sha TEXT NOT NULL,
+                path TEXT NOT NULL,
+                line INTEGER NOT NULL,
+                end_line INTEGER,
+                priority TEXT NOT NULL CHECK (priority IN ('P0', 'P1', 'P2', 'P3')),
+                title TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('new', 'active', 'resolved', 'relocated')
+                ),
+                first_seen_sha TEXT NOT NULL,
+                last_seen_sha TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (repository, pull_request_number, fingerprint)
+            );
+            CREATE INDEX IF NOT EXISTS idx_findings_repository_pr_status
+                ON findings (repository, pull_request_number, status);
+            CREATE TABLE IF NOT EXISTS omp_sessions (
+                delivery_id TEXT PRIMARY KEY,
+                repository TEXT NOT NULL,
+                pull_request_number INTEGER NOT NULL,
+                head_sha TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('completed', 'failed')),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS omp_tool_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                delivery_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                event TEXT NOT NULL CHECK (event IN ('start', 'end')),
+                tool_name TEXT NOT NULL,
+                is_error INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_omp_tool_audit_delivery
+                ON omp_tool_audit (delivery_id, id);
             CREATE TABLE IF NOT EXISTS review_metrics (
                 delivery_id TEXT PRIMARY KEY,
                 diff_file_count INTEGER NOT NULL DEFAULT 0,
@@ -784,6 +1023,68 @@ class QueueStore:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (repository, pull_request_number, head_sha)
             )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS findings (
+                repository TEXT NOT NULL,
+                pull_request_number INTEGER NOT NULL,
+                fingerprint TEXT NOT NULL,
+                head_sha TEXT NOT NULL,
+                path TEXT NOT NULL,
+                line INTEGER NOT NULL,
+                end_line INTEGER,
+                priority TEXT NOT NULL CHECK (priority IN ('P0', 'P1', 'P2', 'P3')),
+                title TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('new', 'active', 'resolved', 'relocated')
+                ),
+                first_seen_sha TEXT NOT NULL,
+                last_seen_sha TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (repository, pull_request_number, fingerprint)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_findings_repository_pr_status
+                ON findings (repository, pull_request_number, status)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS omp_sessions (
+                delivery_id TEXT PRIMARY KEY,
+                repository TEXT NOT NULL,
+                pull_request_number INTEGER NOT NULL,
+                head_sha TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('completed', 'failed')),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS omp_tool_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                delivery_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                event TEXT NOT NULL CHECK (event IN ('start', 'end')),
+                tool_name TEXT NOT NULL,
+                is_error INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_omp_tool_audit_delivery
+                ON omp_tool_audit (delivery_id, id)
             """
         )
 
@@ -885,6 +1186,25 @@ class QueueStore:
             head_sha=str(row["head_sha"]),
             comment_id=int(row["comment_id"]) if row["comment_id"] is not None else None,
             created_at=str(row["created_at"]),
+        )
+
+    @staticmethod
+    def _finding_from_row(row: sqlite3.Row) -> FindingRecord:
+        return FindingRecord(
+            fingerprint=str(row["fingerprint"]),
+            repository=str(row["repository"]),
+            pull_request_number=int(row["pull_request_number"]),
+            head_sha=str(row["head_sha"]),
+            path=str(row["path"]),
+            line=int(row["line"]),
+            end_line=int(row["end_line"]) if row["end_line"] is not None else None,
+            priority=str(row["priority"]),
+            title=str(row["title"]),
+            status=str(row["status"]),
+            first_seen_sha=str(row["first_seen_sha"]),
+            last_seen_sha=str(row["last_seen_sha"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
         )
 
     def _connect(self) -> sqlite3.Connection:

@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     bind_port: int = Field(8090, alias="ROBOT_BIND_PORT", gt=0, le=65535)
     database_path: Path = Field(Path("data/review-bot.sqlite3"), alias="ROBOT_DATABASE_PATH")
     review_rule_file: Path = Field(Path("review-rules.md"), alias="ROBOT_REVIEW_RULE_FILE")
+    review_path_rule_file: Path = Field(Path("review-rules.toml"), alias="ROBOT_REVIEW_PATH_RULE_FILE")
     max_diff_bytes: int = Field(200_000, alias="ROBOT_MAX_DIFF_BYTES", gt=0)
     max_review_bytes: int = Field(50_000, alias="ROBOT_MAX_REVIEW_BYTES", gt=0)
     request_timeout_seconds: float = Field(90.0, alias="ROBOT_REQUEST_TIMEOUT_SECONDS", gt=0)
@@ -42,8 +43,9 @@ class Settings(BaseSettings):
     review_mode: Literal["fast", "deep"] = Field("fast", alias="ROBOT_REVIEW_MODE")
     omp_command: str = Field("omp", alias="ROBOT_OMP_COMMAND")
     omp_model: str | None = Field(None, alias="ROBOT_OMP_MODEL")
-    deep_review_timeout_seconds: float = Field(300.0, alias="ROBOT_DEEP_REVIEW_TIMEOUT_SECONDS", gt=0, le=3_600)
     omp_sandboxed: bool = Field(False, alias="ROBOT_OMP_SANDBOXED")
+    roboomp_webhook_url: AnyHttpUrl | None = Field(None, alias="ROBOT_ROBOOMP_WEBHOOK_URL")
+    roboomp_timeout_seconds: float = Field(15.0, alias="ROBOT_ROBOOMP_TIMEOUT_SECONDS", gt=0, le=120)
 
     @property
     def repo_allowlist(self) -> frozenset[str]:
@@ -81,6 +83,15 @@ class Settings(BaseSettings):
     def reject_blank_text(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():
             raise ValueError("configuration value must not be blank")
+        return value
+
+    @field_validator("roboomp_webhook_url", mode="after")
+    @classmethod
+    def validate_roboomp_webhook_url(cls, value: AnyHttpUrl | None) -> AnyHttpUrl | None:
+        if value is not None and value.scheme not in {"http", "https"}:
+            raise ValueError("ROBOT_ROBOOMP_WEBHOOK_URL must use http or https")
+        if value is not None and (value.username is not None or value.password is not None):
+            raise ValueError("ROBOT_ROBOOMP_WEBHOOK_URL must not contain credentials")
         return value
 
 

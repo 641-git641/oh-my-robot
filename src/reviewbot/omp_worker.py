@@ -87,30 +87,57 @@ class OmpReadOnlyReviewer:
         if len(archive) > _MAX_ARCHIVE_BYTES:
             raise OmpReviewError("PR archive exceeds the deep-review size limit", retryable=False)
         env_wrapper = (
-            "import os,subprocess,sys; "
-            "blocked={'GITHUB_TOKEN','GITHUB_WEBHOOK_SECRET','ROBOT_ADMIN_TOKEN',"
             "'DEEPSEEK_API_KEY','ROBOMP_GH_PROXY_HMAC_KEY'}; "
             "[os.environ.pop(k,None) for k in list(os.environ) if k.upper() in blocked]; "
             "raise SystemExit(subprocess.call(sys.argv[1:], env=os.environ))"
         )
         with TemporaryDirectory(prefix="oh-my-robot-omp-") as temporary:
             worktree = _extract_archive(archive, Path(temporary))
+            audit: list[dict[str, object]] = []
+            session_id: str | None = None
+
+            def on_tool_start(event: object) -> None:
+                audit.append(
+                    {
+                        "event": "start",
+                        "tool": str(getattr(event, "tool_name", "unknown")),
+                        "tool_call_id": str(getattr(event, "tool_call_id", "")),
+                    }
+                )
+
+            def on_tool_end(event: object) -> None:
+                audit.append(
+                    {
+                        "event": "end",
+                        "tool": str(getattr(event, "tool_name", "unknown")),
+                        "tool_call_id": str(getattr(event, "tool_call_id", "")),
+                        "is_error": bool(getattr(event, "is_error", False)),
+                    }
+                )
+
             client = RpcClient(
                 executable=sys.executable,
                 extra_args=("-c", env_wrapper, *self._command),
                 cwd=worktree,
+                session_dir=Path(worktree) / ".omp-session",
                 model=self._model,
-                no_session=True,
                 no_skills=True,
                 no_rules=True,
                 tools=("read", "glob", "grep", "lsp"),
                 startup_timeout=min(self._timeout_seconds, 30.0),
                 request_timeout=min(self._timeout_seconds, 60.0),
             )
+            client.on_tool_execution_start(on_tool_start)
+            client.on_tool_execution_end(on_tool_end)
             self._register_client(client)
             try:
                 try:
                     with client:
+                        try:
+                            state = client.get_state()
+                            session_id = str(getattr(state, "session_id", "")) or None
+                        except Exception:
+                            session_id = None
                         turn = client.prompt_and_wait(
                             _review_prompt(pull_request, diff, rules),
                             timeout=self._timeout_seconds,
@@ -125,7 +152,11 @@ class OmpReadOnlyReviewer:
             result = ReviewResult.model_validate_json(_strip_json_fence(content))
         except Exception as exc:
             raise ReviewFormatError("OMP response did not match the ReviewResult schema") from exc
-        return ReviewExecution(normalize_result(result, diff))
+        return ReviewExecution(
+            normalize_result(result, diff),
+            session_id=session_id,
+            tool_audit=tuple(audit),
+        )
 
 
 def _extract_archive(archive: bytes, destination: Path) -> Path:

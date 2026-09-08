@@ -151,6 +151,70 @@ class GitHubClient:
             return payload["id"]
         return None
 
+    async def create_pull_request_review_comment(
+        self,
+        repository: str,
+        number: int,
+        *,
+        body: str,
+        commit_id: str,
+        path: str,
+        line: int,
+        side: str = "RIGHT",
+        start_line: int | None = None,
+        start_side: str | None = None,
+    ) -> int | None:
+        if line <= 0 or (start_line is not None and start_line <= 0):
+            raise ValueError("review comment line must be positive")
+        if side not in {"LEFT", "RIGHT"}:
+            raise ValueError("review comment side must be LEFT or RIGHT")
+        if start_side is not None and start_side not in {"LEFT", "RIGHT"}:
+            raise ValueError("review comment start_side must be LEFT or RIGHT")
+        comment: dict[str, Any] = {
+            "body": body,
+            "commit_id": commit_id,
+            "path": path,
+            "line": line,
+            "side": side,
+        }
+        if start_line is not None:
+            comment["start_line"] = start_line
+            comment["start_side"] = start_side or side
+        payload = await self._request(
+            "POST",
+            self._review_comments_path(repository, number),
+            json_body=comment,
+        )
+        if isinstance(payload, Mapping) and isinstance(payload.get("id"), int):
+            return payload["id"]
+        return None
+
+    async def create_check_run(
+        self,
+        repository: str,
+        *,
+        head_sha: str,
+        name: str,
+        status: str,
+        conclusion: str | None,
+        summary: str,
+    ) -> int | None:
+        output = {"title": name, "summary": summary}
+        payload = await self._request(
+            "POST",
+            self._check_runs_path(repository),
+            json_body={
+                "name": name,
+                "head_sha": head_sha,
+                "status": status,
+                "conclusion": conclusion,
+                "output": output,
+            },
+        )
+        if isinstance(payload, Mapping) and isinstance(payload.get("id"), int):
+            return payload["id"]
+        return None
+
     async def _request(
         self,
         method: str,
@@ -211,6 +275,25 @@ class GitHubClient:
         return parts[0], parts[1]
 
     @staticmethod
+    def _review_comments_path(repository: str, number: int) -> str:
+        owner, name = GitHubClient._split_repository(repository)
+        if number <= 0:
+            raise ValueError("Pull Request number must be positive")
+        return f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/pulls/{number}/comments"
+
+    @staticmethod
+    def _check_runs_path(repository: str) -> str:
+        owner, name = GitHubClient._split_repository(repository)
+        return f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/check-runs"
+
+    @staticmethod
+    def _split_repository(repository: str) -> tuple[str, str]:
+        parts = repository.strip().split("/", 1)
+        if len(parts) != 2 or not all(_REPOSITORY_PART.fullmatch(part) for part in parts):
+            raise ValueError(f"invalid GitHub repository: {repository!r}")
+        return parts[0], parts[1]
+
+    @staticmethod
     def _parse_pull_request(repository: str, number: int, payload: Any) -> PullRequest:
         if not isinstance(payload, Mapping):
             raise GitHubApiError("GET", "pull request", 200, "unexpected pull request response")
@@ -231,7 +314,6 @@ class GitHubClient:
             base_ref=GitHubClient._first_text(base.get("ref"), "main"),
             html_url=GitHubClient._first_text(payload.get("html_url")),
         )
-
     @staticmethod
     def _parse_changed_file(payload: Mapping[str, Any]) -> ChangedFile:
         filename = GitHubClient._first_text(payload.get("filename"))

@@ -129,27 +129,34 @@ GitHub Webhook
 
 ## 用户可感知的功能
 
-用户主要通过 GitHub PR 页面和可选 Admin 接口使用本项目：
+用户主要通过 GitHub PR 页面、Issue/PR 评论和可选 Admin 接口使用本项目：
 
 - 创建或更新 PR 后，机器人自动在 PR 评论区发布 AI Review；
 - 评论包含总体结论、P0～P3 问题、文件路径、新增行号、影响、修复建议、置信度和测试建议；
+- 可定位的问题会额外发布 GitHub 行级 Review Comment，并创建 `oh-my-robot review` Check Run；
 - 同一个 PR 提交不会重复发布相同 Review；
 - PR 在评审期间产生新提交时，旧提交结论不会发布，机器人会继续评审最新 head；
 - Draft、关闭的 PR 或不在白名单的仓库不会产生 Review 评论；
 - 大型 Diff、二进制和 patchless 文件会在覆盖范围中明确标记，不会伪造问题；
+- finding 会按稳定指纹追踪为 `new / active / relocated / resolved`；
+- 可选 Deep 模式可以使用 OMP 只读读取 PR 归档中的仓库文件，并记录会话和工具调用审计；
+- 配置 `ROBOT_ROBOOMP_WEBHOOK_URL` 后，Issue、PR 评论、PR Review 事件会转发给 roboomp；
+- roboomp 负责 Issue 对话、只读命令、授权修复、测试和 Draft PR；当前 Fast Review 进程不持有写仓库能力；
 - 维护者可以通过 Admin API 查询事件、Review、指标，Replay 失败任务或手动触发当前 head Review；
-- 可选 Deep 模式可以使用 OMP 只读读取 PR 归档中的仓库文件，辅助跨文件分析；
-- 默认不会修改代码、Push 分支、创建 PR、批准、拒绝或合并代码。
+- 未配置 roboomp 转发时，当前服务只处理 Pull Request Review；
+- Fast/Deep Review 进程不会修改代码、Push 分支、创建 PR、批准、拒绝或合并代码；授权写操作只由 roboomp 处理。
 
 ## 目前已实现功能
 
 ### GitHub 接入
 
-- GitHub Pull Request Webhook 验签：`X-Hub-Signature-256`；
-- 支持 `opened`、`reopened`、`synchronize`、`ready_for_review`；
+- GitHub Webhook 验签：`X-Hub-Signature-256`；
+- Pull Request 事件支持 `opened`、`reopened`、`synchronize`、`ready_for_review`；
+- `issue_comment`、`issues`、PR review 事件可按配置转发给 roboomp；
 - GitHub REST API 分页获取 PR 文件、Diff 和评论；
+- 支持 PR 行级 Review Comment 和 Check Run；
 - 使用 Bearer Token、`application/vnd.github+json` 和 API 版本请求头；
-- 按仓库白名单过滤事件；
+- 按仓库白名单过滤 PR Review 事件；
 - `X-GitHub-Delivery` 幂等去重。
 
 ### Review 执行
@@ -160,6 +167,7 @@ GitHub Webhook
 - 支持 P0～P3 优先级、置信度和测试建议；
 - 评论使用 `<!-- oh-my-robot-review:<headSha> -->` marker；
 - 同一个仓库、PR、head SHA 只发布一次；
+- finding 持久化并追踪 `new / active / relocated / resolved`；
 - patchless 文件和超出限制的文件明确标记为不可评审。
 
 ### 可靠性与队列
@@ -204,7 +212,7 @@ Authorization: Bearer <ROBOT_ADMIN_TOKEN>
 ### 可观测性
 
 - JSON 结构化日志；
-- Webhook、Job、GitHub 请求、模型请求、评论发布和 Admin 操作事件；
+- Webhook、Job、GitHub 请求、模型请求、评论发布、OMP 会话和 Admin 操作事件；
 - GitHub/model 错误分类；
 - 模型输入/输出 Token 统计；
 - GitHub、模型耗时统计；
@@ -236,6 +244,28 @@ read / glob / grep / lsp
 
 深度模式不会修改文件、执行 Bash、Push 或写入 GitHub。无法使用 OMP 时应继续使用默认的 `fast` 模式。
 
+### roboomp 共存适配（Issue / PR 对话 / Fix）
+
+当前仓库不复制 roboomp 的写操作运行时。部署两个服务：
+
+```text
+GitHub Webhook
+  -> oh-my-robot:8090
+       Pull Request 事件 -> Fast/Deep Review
+       Issue/PR 评论事件 -> ROBOT_ROBOOMP_WEBHOOK_URL
+  -> roboomp:6543
+       Issue 对话、只读命令、人工授权修复、测试、Draft PR
+```
+
+配置：
+
+```text
+ROBOT_ROBOOMP_WEBHOOK_URL=http://127.0.0.1:6543/webhook/github
+ROBOT_ROBOOMP_TIMEOUT_SECONDS=15
+```
+
+roboomp 应使用与当前 GitHub Webhook 相同的 Secret，并按其部署文档运行 `gh-proxy`、隔离工作区和 OMP。当前适配层只转发显式允许的 GitHub Webhook 头和原始 JSON body，不转发 GitHub Token。未配置 URL 时，Issue/PR 对话事件会安全跳过。
+
 ## Webhook 配置
 
 在 GitHub 仓库 `Settings -> Webhooks` 中配置：
@@ -243,21 +273,34 @@ read / glob / grep / lsp
 - Payload URL：`https://<your-host>/webhook/github`
 - Content type：`application/json`
 - Secret：与 `GITHUB_WEBHOOK_SECRET` 相同
-- Events：选择 `Pull requests`
+- Events：选择 `Pull requests`、`Issue comments`、`Issues` 和 `Pull request reviews`
 
-建议使用限定仓库的 fine-grained token。Token 需要能够读取目标仓库的 Pull Request 信息和 Diff，并创建 PR Issue Comment。
+建议使用限定仓库的 fine-grained token。Token 需要能够读取目标仓库的 Pull Request 信息和 Diff，并创建 PR Issue Comment；roboomp 的写操作权限按其部署文档单独配置。
 
 ## 技术链路
 
 ```text
-GitHub Pull Request Webhook
-  -> FastAPI 验签、过滤和入队
-  -> WorkerPool 并发调度
-  -> GitHub REST API 获取 PR 和 Diff
-  -> DeepSeek 结构化评审
-  -> Pydantic 校验和新增行定位
-  -> GitHub Issue Comment 发布总结
-  -> SQLite 记录 Review、指标和终态
+GitHub Webhook
+  -> FastAPI 验签
+  -> Pull Request 事件：WorkerPool -> GitHub Diff -> Fast/Deep Review -> 评论、行级评论、Check Run
+  -> Issue/PR 对话事件：显式头转发 -> roboomp -> Issue 对话或授权修复
+  -> SQLite 记录事件、Review、finding、OMP 审计
+```
+
+## 自定义评审规则
+
+默认读取 `ROBOT_REVIEW_RULE_FILE`（默认 `review-rules.md`）和 `ROBOT_REVIEW_PATH_RULE_FILE`（默认 `review-rules.toml`）。规则文件必须由部署者从受信任来源挂载，不能直接读取 PR 新提交中的规则文件。
+
+`review-rules.toml` 支持全局、仓库和路径规则：
+
+```toml
+rules = "全局规则"
+
+[paths."src/auth/**"]
+rules = ["检查授权", "检查敏感信息"]
+
+[repositories."owner/repo"]
+rules = "保持该仓库的公开 API 兼容"
 ```
 
 ## 安全边界
@@ -265,15 +308,11 @@ GitHub Pull Request Webhook
 - GitHub Token、Webhook Secret、Admin Token 和 DeepSeek Key 只存在服务端环境；
 - GitHub Token 不进入 URL 查询参数；
 - PR 描述、代码、README、注释和 Diff 都按不可信数据处理；
-- 不 Clone、不执行、不修改 PR 代码；
-- 不 Push、不批准、不拒绝、不合并；
+- Fast/Deep Review 不 Clone、不执行、不修改 PR 代码；
+- Fast/Deep Review 不 Push、不批准、不拒绝、不合并；
 - 默认只发布评审评论，不自动阻断合并；
 - 错误日志、SQLite 错误字段和 Admin 响应进行敏感信息脱敏；
-- OMP 深度模式只读；自动修复仍需后续人工授权设计。
-
-## 自定义评审规则
-
-默认读取 `ROBOT_REVIEW_RULE_FILE`，默认值为 `review-rules.md`。模型只接收受大小限制的 PR 元信息、评审规则和 Diff。
+- OMP 深度模式只读；roboomp 写操作必须经过其自身授权、工作区和 Git gate。
 
 ## 配置参考
 
@@ -293,6 +332,7 @@ ROBOT_BIND_HOST=0.0.0.0
 ROBOT_BIND_PORT=8090
 ROBOT_DATABASE_PATH=data/review-bot.sqlite3
 ROBOT_REVIEW_RULE_FILE=review-rules.md
+ROBOT_REVIEW_PATH_RULE_FILE=review-rules.toml
 ROBOT_MAX_DIFF_BYTES=200000
 ROBOT_MAX_REVIEW_BYTES=50000
 ROBOT_REQUEST_TIMEOUT_SECONDS=90
@@ -300,6 +340,13 @@ ROBOT_MAX_RETRIES=2
 ROBOT_MAX_CONCURRENCY=4
 ROBOT_SHUTDOWN_DRAIN_SECONDS=25
 ROBOT_ADMIN_TOKEN=
+ROBOT_REVIEW_MODE=fast
+ROBOT_OMP_COMMAND=omp
+ROBOT_OMP_MODEL=
+ROBOT_DEEP_REVIEW_TIMEOUT_SECONDS=300
+ROBOT_OMP_SANDBOXED=false
+ROBOT_ROBOOMP_WEBHOOK_URL=
+ROBOT_ROBOOMP_TIMEOUT_SECONDS=15
 ROBOT_REVIEW_ENABLED=true
 ```
 
@@ -313,7 +360,7 @@ python -m ruff check src tests
 当前本地验证结果：
 
 ```text
-55 passed
+72 passed
 All checks passed
 ```
 

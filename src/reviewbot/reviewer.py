@@ -10,7 +10,7 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from reviewbot.deepseek_client import CompletionResult, DeepSeekApiError
-from reviewbot.diff import DiffContext
+from reviewbot.diff import DiffContext, DiffReviewPlan
 from reviewbot.models import PullRequest, ReviewFinding, ReviewResult
 
 _JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*([\s\S]*?)\s*```$", re.IGNORECASE)
@@ -25,7 +25,8 @@ class ReviewExecution:
     result: ReviewResult
     input_tokens: int | None = None
     output_tokens: int | None = None
-
+    session_id: str | None = None
+    tool_audit: tuple[Mapping[str, object], ...] = ()
 
 class ReviewFormatError(RuntimeError):
     def __init__(
@@ -109,6 +110,46 @@ class ReviewEngine:
             output_tokens=output_tokens if output_seen else None,
         )
 
+    async def review_plan(
+        self,
+        pull_request: PullRequest,
+        plan: DiffReviewPlan,
+        rules: str,
+    ) -> ReviewExecution:
+        if not plan.batches:
+            return ReviewExecution(
+                ReviewResult(
+                    summary="本次 PR 没有可评审的文本 Diff。",
+                    verdict="clean",
+                    rank="P3",
+                )
+            )
+        executions: list[ReviewExecution] = []
+        input_tokens = 0
+        output_tokens = 0
+        input_seen = False
+        output_seen = False
+        for batch in plan.batches:
+            try:
+                execution = await self.review_with_metadata(pull_request, batch, rules)
+            except (DeepSeekApiError, ReviewFormatError) as exc:
+                if input_seen:
+                    exc.input_tokens = (exc.input_tokens or 0) + input_tokens
+                if output_seen:
+                    exc.output_tokens = (exc.output_tokens or 0) + output_tokens
+                raise
+            executions.append(execution)
+            if execution.input_tokens is not None:
+                input_tokens += execution.input_tokens
+                input_seen = True
+            if execution.output_tokens is not None:
+                output_tokens += execution.output_tokens
+                output_seen = True
+        return ReviewExecution(
+            merge_review_results([item.result for item in executions]),
+            input_tokens if input_seen else None,
+            output_tokens if output_seen else None,
+        )
     async def _complete(
         self,
         messages: Sequence[Mapping[str, str]],
@@ -128,6 +169,34 @@ def _safe_format_error(error: ValidationError | json.JSONDecodeError | None) -> 
     if isinstance(error, json.JSONDecodeError):
         return "invalid JSON response"
     return "invalid response format"
+
+
+def merge_review_results(results: Sequence[ReviewResult]) -> ReviewResult:
+    if not results:
+        return ReviewResult(summary="本次 PR 没有可评审的文本 Diff。", verdict="clean", rank="P3")
+    priority_order = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+    findings_by_key: dict[tuple[str, int, str], ReviewFinding] = {}
+    test_suggestions: list[str] = []
+    for result in results:
+        for finding in result.findings:
+            key = (finding.path, finding.line, finding.title.strip().lower())
+            previous = findings_by_key.get(key)
+            if previous is None or priority_order[finding.priority] < priority_order[previous.priority]:
+                findings_by_key[key] = finding
+        for suggestion in result.test_suggestions:
+            if suggestion not in test_suggestions:
+                test_suggestions.append(suggestion)
+    findings = list(findings_by_key.values())
+    findings.sort(key=lambda item: (priority_order[item.priority], item.path, item.line))
+    rank = min((result.rank for result in results), key=priority_order.__getitem__)
+    verdict = "needs_attention" if any(item.verdict == "needs_attention" for item in results) else "clean"
+    return ReviewResult(
+        summary="\n\n".join(result.summary.strip() for result in results if result.summary.strip())[:4_000],
+        verdict=verdict,
+        rank=rank,
+        findings=findings[:20],
+        test_suggestions=test_suggestions[:10],
+    )
 
 def normalize_result(result: ReviewResult, diff: DiffContext) -> ReviewResult:
     valid_findings: list[ReviewFinding] = []

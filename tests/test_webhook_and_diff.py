@@ -4,7 +4,13 @@ import json
 
 from reviewbot.diff import build_diff_context, parse_changed_lines
 from reviewbot.models import ChangedFile
-from reviewbot.webhook import is_pull_request_event, is_review_action, parse_review_job, verify_webhook
+from reviewbot.webhook import (
+    is_interaction_event,
+    is_pull_request_event,
+    is_review_action,
+    parse_review_job,
+    verify_webhook,
+)
 
 
 def test_github_webhook_parses_pull_request_payload_and_verifies_hmac() -> None:
@@ -35,6 +41,12 @@ def test_github_webhook_parses_pull_request_payload_and_verifies_hmac() -> None:
     assert is_review_action(job.action)
 
 
+def test_webhook_classifies_roboomp_interaction_events() -> None:
+    assert is_interaction_event("issue_comment")
+    assert is_interaction_event("pull_request_review_comment")
+    assert not is_interaction_event("push")
+
+
 def test_webhook_rejects_missing_or_unprefixed_signature() -> None:
     body = b'{"number":1}'
 
@@ -54,7 +66,7 @@ def test_diff_context_tracks_added_lines_and_omits_large_files() -> None:
 
     omitted = build_diff_context(files, max_bytes=1)
     assert omitted.omitted_files == ("src/example.ts",)
-    assert "omitted" in omitted.text
+    assert len(omitted.text.encode("utf-8")) <= 1
 
 
 def test_diff_context_marks_patchless_files_unavailable() -> None:

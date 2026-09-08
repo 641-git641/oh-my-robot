@@ -8,13 +8,15 @@ from pathlib import Path
 from typing import Any
 
 from reviewbot.deepseek_client import DeepSeekApiError
-from reviewbot.diff import build_diff_context
+from reviewbot.diff import DiffReviewPlan, build_diff_batches, build_diff_context
+from reviewbot.findings import finding_fingerprint
 from reviewbot.github_client import GitHubApiError
-from reviewbot.models import ReviewJob
+from reviewbot.models import PullRequest, ReviewJob, ReviewResult
 from reviewbot.omp_worker import OmpReadOnlyReviewer, OmpReviewError
 from reviewbot.ports import GitHubPort, ReviewPort
-from reviewbot.renderer import render_review, review_marker
+from reviewbot.renderer import render_inline_finding, render_review, review_marker
 from reviewbot.reviewer import ReviewExecution, ReviewFormatError
+from reviewbot.rules import compose_rules
 from reviewbot.storage import QueueStore
 
 log = logging.getLogger(__name__)
@@ -45,6 +47,7 @@ class ReviewService:
         max_review_bytes: int,
         allowlist: frozenset[str],
         enabled: bool = True,
+        path_rule_file: Path | None = None,
     ) -> None:
         self._store = store
         self._github = github
@@ -52,6 +55,7 @@ class ReviewService:
         self._deep_reviewer = deep_reviewer
         self._review_mode = review_mode
         self._rule_file = rule_file
+        self._path_rule_file = path_rule_file
         self._max_diff_bytes = max_diff_bytes
         self._max_review_bytes = max_review_bytes
         self._allowlist = allowlist
@@ -137,8 +141,14 @@ class ReviewService:
             self._github.list_pull_request_files(pull_request.repository, pull_request.number),
         )
         github_duration_ms += elapsed
+        diff_plan = build_diff_batches(changed_files, self._max_diff_bytes)
         diff = build_diff_context(changed_files, self._max_diff_bytes)
-        rules = load_rules(self._rule_file)
+        rules = load_rules(
+            self._rule_file,
+            policy_file=self._path_rule_file,
+            repository=pull_request.repository,
+            changed_paths=(changed_file.filename for changed_file in changed_files),
+        )
         archive: bytes | None = None
         if self._review_mode == "deep":
             if self._deep_reviewer is None:
@@ -154,6 +164,7 @@ class ReviewService:
             github_duration_ms += elapsed
         model_started = time.perf_counter()
         review_with_metadata = getattr(self._engine, "review_with_metadata", None)
+        review_plan = getattr(self._engine, "review_plan", None)
         try:
             if self._review_mode == "deep":
                 execution = await self._deep_reviewer.review_with_metadata(
@@ -162,6 +173,8 @@ class ReviewService:
                     rules,
                     archive,
                 )
+            elif callable(review_plan):
+                execution = await review_plan(pull_request, diff_plan, rules)
             elif callable(review_with_metadata):
                 execution = await review_with_metadata(pull_request, diff, rules)
             else:
@@ -215,6 +228,16 @@ class ReviewService:
             )
             raise
         model_duration_ms = (time.perf_counter() - model_started) * 1000
+        if execution.session_id is not None:
+            await asyncio.to_thread(
+                self._store.record_omp_execution,
+                job.delivery_id,
+                pull_request.repository,
+                pull_request.number,
+                pull_request.head_sha,
+                execution.session_id,
+                execution.tool_audit,
+            )
         await asyncio.to_thread(
             self._store.record_review_attempt_metrics,
             job.delivery_id,
@@ -281,7 +304,12 @@ class ReviewService:
             )
             return
 
-        comment = render_review(pull_request, result, max_bytes=self._max_review_bytes)
+        comment = render_review(
+            pull_request,
+            result,
+            max_bytes=self._max_review_bytes,
+            coverage=diff_plan,
+        )
         comment_id, elapsed = await _timed_github(
             job.delivery_id,
             "create_pull_request_comment",
@@ -292,6 +320,13 @@ class ReviewService:
             ),
         )
         github_duration_ms += elapsed
+        await self._publish_review_outputs(
+            pull_request=pull_request,
+            result=result,
+            diff_plan=diff_plan,
+            summary=comment,
+            delivery_id=job.delivery_id,
+        )
         await asyncio.to_thread(
             self._store.complete_review,
             job.delivery_id,
@@ -308,6 +343,8 @@ class ReviewService:
             review_rank=result.rank,
             model_duration_ms=model_duration_ms,
             github_duration_ms=github_duration_ms,
+            findings=result.findings,
+            reviewed_paths=frozenset(diff_plan.reviewed_files),
         )
         log.info(
             "comment_created",
@@ -334,6 +371,73 @@ class ReviewService:
                 "github_duration_ms": round(github_duration_ms, 2),
             },
         )
+
+    async def _publish_review_outputs(
+        self,
+        *,
+        pull_request: PullRequest,
+        result: ReviewResult,
+        diff_plan: DiffReviewPlan,
+        summary: str,
+        delivery_id: str,
+    ) -> None:
+        create_inline = getattr(self._github, "create_pull_request_review_comment", None)
+        if callable(create_inline):
+            for finding in result.findings:
+                if not _finding_is_locatable(diff_plan, finding.path, finding.line, finding.end_line):
+                    continue
+                end_line = finding.end_line or finding.line
+                try:
+                    await create_inline(
+                        pull_request.repository,
+                        pull_request.number,
+                        body=render_inline_finding(pull_request, finding, finding_fingerprint(finding)),
+                        commit_id=pull_request.head_sha,
+                        path=finding.path,
+                        line=end_line,
+                        side="RIGHT",
+                        start_line=finding.line if end_line != finding.line else None,
+                        start_side="RIGHT" if end_line != finding.line else None,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "inline_comment_fallback",
+                        extra={
+                            "delivery_id": delivery_id,
+                            "path": finding.path,
+                            "line": finding.line,
+                            "error_type": exc.__class__.__name__,
+                            "http_status": getattr(exc, "status_code", None),
+                        },
+                    )
+
+        create_check_run = getattr(self._github, "create_check_run", None)
+        if callable(create_check_run):
+            conclusion = (
+                "success"
+                if result.verdict == "clean"
+                else "failure"
+                if result.rank in {"P0", "P1"}
+                else "neutral"
+            )
+            try:
+                await create_check_run(
+                    pull_request.repository,
+                    head_sha=pull_request.head_sha,
+                    name="oh-my-robot review",
+                    status="completed",
+                    conclusion=conclusion,
+                    summary=summary,
+                )
+            except Exception as exc:
+                log.warning(
+                    "check_run_fallback",
+                    extra={
+                        "delivery_id": delivery_id,
+                        "error_type": exc.__class__.__name__,
+                        "http_status": getattr(exc, "status_code", None),
+                    },
+                )
 
     @staticmethod
     def is_retryable(error: Exception) -> bool:
@@ -391,15 +495,43 @@ async def _timed_github(
     )
     return result, duration_ms
 
+
 def _refresh_delivery_id(repository: str, number: int, head_sha: str) -> str:
     return f"refresh:{repository.lower()}:{number}:{head_sha}"
 
 
-def load_rules(path: Path) -> str:
+def _finding_is_locatable(
+    plan: DiffReviewPlan,
+    path: str,
+    line: int,
+    end_line: int | None,
+) -> bool:
+    if path not in plan.reviewed_files:
+        return False
+    final_line = end_line or line
+    if final_line < line or final_line - line > 100:
+        return False
+    return all(
+        any(batch.has_changed_line(path, candidate) for batch in plan.batches)
+        for candidate in range(line, final_line + 1)
+    )
+
+
+def load_rules(
+    path: Path,
+    *,
+    policy_file: Path | None = None,
+    repository: str = "",
+    changed_paths: tuple[str, ...] = (),
+) -> str:
     try:
         rules = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return _DEFAULT_RULES
-    except OSError:
-        return _DEFAULT_RULES
-    return rules.strip() or _DEFAULT_RULES
+    except (FileNotFoundError, OSError, UnicodeError):
+        rules = _DEFAULT_RULES
+    rules = rules.strip() or _DEFAULT_RULES
+    return compose_rules(
+        rules,
+        policy_file=policy_file,
+        repository=repository,
+        changed_paths=changed_paths,
+    )

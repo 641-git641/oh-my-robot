@@ -13,6 +13,31 @@ class GitHubPort(Protocol):
 
     async def create_pull_request_comment(self, repository: str, number: int, body: str) -> int | None: ...
 
+    async def create_pull_request_review_comment(
+        self,
+        repository: str,
+        number: int,
+        *,
+        body: str,
+        commit_id: str,
+        path: str,
+        line: int,
+        side: str = "RIGHT",
+        start_line: int | None = None,
+        start_side: str | None = None,
+    ) -> int | None: ...
+
+    async def create_check_run(
+        self,
+        repository: str,
+        *,
+        head_sha: str,
+        name: str,
+        status: str,
+        conclusion: str | None,
+        summary: str,
+    ) -> int | None: ...
+
     async def list_pull_request_comments(self, repository: str, number: int) -> list[PullRequestComment]: ...
 
 

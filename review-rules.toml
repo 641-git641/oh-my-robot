@@ -1,0 +1,2 @@
+# Optional operator-controlled repository/path review rules.
+# Keep this file on the trusted deployment side; never source it from a PR branch.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 
+from reviewbot.diff import DiffReviewPlan
 from reviewbot.models import PullRequest, ReviewFinding, ReviewResult
 from reviewbot.security import redact_sensitive_text
 
@@ -12,7 +13,22 @@ def review_marker(head_sha: str) -> str:
     return f"<!-- oh-my-robot-review:{head_sha} -->"
 
 
-def render_review(pull_request: PullRequest, result: ReviewResult, *, max_bytes: int) -> str:
+def render_inline_finding(pull_request: PullRequest, finding: ReviewFinding, fingerprint: str) -> str:
+    return "\n".join(
+        [
+            review_marker(pull_request.head_sha),
+            f"<!-- finding:{html.escape(fingerprint, quote=True)} -->",
+            *_render_finding(finding),
+        ]
+    ).strip()
+
+def render_review(
+    pull_request: PullRequest,
+    result: ReviewResult,
+    *,
+    max_bytes: int,
+    coverage: DiffReviewPlan | None = None,
+) -> str:
     marker = review_marker(pull_request.head_sha)
     verdict = "通过初步审查" if result.verdict == "clean" else "需要关注"
     lines = [
@@ -23,6 +39,18 @@ def render_review(pull_request: PullRequest, result: ReviewResult, *, max_bytes:
         "",
         _safe_text(result.summary),
     ]
+
+    if coverage is not None:
+        lines.extend(
+            [
+                "",
+                "### Review 覆盖范围",
+                f"- changed files：{coverage.total_files}",
+                f"- reviewed files：{len(coverage.reviewed_files)}",
+                f"- omitted files：{len(coverage.omitted_files)}",
+                f"- review batches：{coverage.batch_count}",
+            ]
+        )
 
     findings = sorted(
         result.findings, key=lambda finding: (_PRIORITY_ORDER[finding.priority], finding.path, finding.line)
