@@ -6,7 +6,7 @@
 ![SQLite](https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white)
 ![DeepSeek](https://img.shields.io/badge/AI-DeepSeek-4D6BFE)
 
-面向 GitHub Pull Request 的只读 AI Review 服务：接收 Webhook，获取 PR Diff，调用 DeepSeek 生成结构化评审结果，并将 Markdown 总结发布到 PR 评论区。
+面向 GitHub Pull Request 的 AI Review 服务：接收 Webhook，在 PR 评论区发布评审结果。默认只读；接入 roboomp 后，可为 Issue/PR 对话提供授权的修复流程。
 
 ## 快速启动
 
@@ -70,7 +70,8 @@ docker compose up --build -d
 Docker 服务默认监听 `8090`，并持久化：
 
 - `./data:/app/data`：SQLite 数据库；
-- `./review-rules.md:/app/review-rules.md:ro`：评审规则。
+- `./review-rules.md:/app/review-rules.md:ro`：基础评审规则；
+- `./review-rules.toml:/app/review-rules.toml:ro`：仓库和路径评审规则。
 
 ## 部署方式
 
@@ -102,7 +103,7 @@ docker compose logs -f github-review-bot
 docker compose down
 ```
 
-Compose 会将服务运行在容器内，将 `./data` 作为 SQLite 持久化目录，并以只读方式挂载 `review-rules.md`。
+Compose 会将服务运行在容器内，将 `./data` 作为持久化目录，并以只读方式挂载 `review-rules.md` 和 `review-rules.toml`。
 
 ### 公网生产部署
 
@@ -127,144 +128,86 @@ GitHub Webhook
 
 生产部署前，建议创建一个无敏感信息的测试 PR，确认 Webhook 返回 `202`，并确认 PR 评论只出现一条。
 
-## 用户可感知的功能
+## 用户能感知的功能
 
-用户主要通过 GitHub PR 页面、Issue/PR 评论和可选 Admin 接口使用本项目：
+### Pull Request Review
 
-- 创建或更新 PR 后，机器人自动在 PR 评论区发布 AI Review；
-- 评论包含总体结论、P0～P3 问题、文件路径、新增行号、影响、修复建议、置信度和测试建议；
-- 可定位的问题会额外发布 GitHub 行级 Review Comment，并创建 `oh-my-robot review` Check Run；
-- 同一个 PR 提交不会重复发布相同 Review；
-- PR 在评审期间产生新提交时，旧提交结论不会发布，机器人会继续评审最新 head；
-- Draft、关闭的 PR 或不在白名单的仓库不会产生 Review 评论；
-- 大型 Diff、二进制和 patchless 文件会在覆盖范围中明确标记，不会伪造问题；
-- finding 会按稳定指纹追踪为 `new / active / relocated / resolved`；
-- 可选 Deep 模式可以使用 OMP 只读读取 PR 归档中的仓库文件，并记录会话和工具调用审计；
-- 配置 `ROBOT_ROBOOMP_WEBHOOK_URL` 后，Issue、PR 评论、PR Review 事件会转发给 roboomp；
-- roboomp 负责 Issue 对话、只读命令、授权修复、测试和 Draft PR；当前 Fast Review 进程不持有写仓库能力；
-- 维护者可以通过 Admin API 查询事件、Review、指标，Replay 失败任务或手动触发当前 head Review；
-- 未配置 roboomp 转发时，当前服务只处理 Pull Request Review；
-- Fast/Deep Review 进程不会修改代码、Push 分支、创建 PR、批准、拒绝或合并代码；授权写操作只由 roboomp 处理。
+- 创建或更新 Pull Request 后，机器人在 PR 评论区发布 AI Review；
+- 评论给出总体结论、问题等级、文件位置、影响、修改建议和测试建议；
+- 可以在具体代码行看到对应的问题评论；
+- PR 页面可以看到 `oh-my-robot review` Check Run；
+- 同一个提交不会重复发布相同 Review；
+- PR 在评审期间产生新提交时，只发布最新提交的结论；
+- Draft、关闭的 PR 或不在仓库白名单中的 PR 不会发布 Review；
+- 超大 Diff、二进制文件和无法读取的文件会在评论中明确说明，避免让用户误以为已完整检查。
 
-## 目前已实现功能
+### Deep Review（可选）
 
-### GitHub 接入
+- 在普通 Review 之外，Review 可以结合 PR 相关仓库上下文，分析跨文件影响；
+- 适合需要跨文件理解的 PR；
+- Deep Review 仍然只给出评审意见，不修改代码、不 Push、不创建 PR；
+- OMP 不可用或超时时，可以继续使用默认 Fast Review。
 
-- GitHub Webhook 验签：`X-Hub-Signature-256`；
-- Pull Request 事件支持 `opened`、`reopened`、`synchronize`、`ready_for_review`；
-- `issue_comment`、`issues`、PR review 事件可按配置转发给 roboomp；
-- GitHub REST API 分页获取 PR 文件、Diff 和评论；
-- 支持 PR 行级 Review Comment 和 Check Run；
-- 使用 Bearer Token、`application/vnd.github+json` 和 API 版本请求头；
-- 按仓库白名单过滤 PR Review 事件；
-- `X-GitHub-Delivery` 幂等去重。
+### Issue / PR 对话与授权修复（可选）
 
-### Review 执行
+配置 roboomp 后，用户可以在 Issue 或 PR 评论中：
 
-- DeepSeek Chat Completions JSON 模式；
-- Pydantic 校验结构化评审结果；
-- 校验文件路径和 Diff 新增行，丢弃无法定位的意见；
-- 支持 P0～P3 优先级、置信度和测试建议；
-- 评论使用 `<!-- oh-my-robot-review:<headSha> -->` marker；
-- 同一个仓库、PR、head SHA 只发布一次；
-- finding 持久化并追踪 `new / active / relocated / resolved`；
-- patchless 文件和超出限制的文件明确标记为不可评审。
+- 请求解释问题或继续跟进评审；
+- 获取 Issue/PR 的对话式回复；
+- 在获得维护者授权后请求复现、测试和修复；
+- 查看机器人创建的 Draft PR。
 
-### 可靠性与队列
+授权修复由 roboomp 独立执行；未配置 roboomp 时，oh-my-robot 只处理 Pull Request Review。
 
-- SQLite 持久化事件队列；
-- `queued / running / succeeded / failed / skipped / superseded` 状态；
-- 旧 SQLite Schema 无损迁移；
-- 模型评审期间 PR 更新时，旧 head 不发布评论；
-- 自动创建最新 head 的 refresh 任务；
-- refresh 任务支持 force-push 回弹和幂等重排队；
-- GitHub 限流、429、5xx 和网络错误按策略重试；
-- 支持 `ROBOT_MAX_CONCURRENCY`；
-- 不同 PR 并发，同一 PR 数据库级串行；
-- 关停 drain 超时后自动恢复未完成任务。
+### 管理员操作（可选）
 
-### Admin 控制面
+配置 Admin Token 后，管理员可以：
 
-配置 `ROBOT_ADMIN_TOKEN` 后启用；未配置时不会注册 `/admin/*` 路由。
+- 查看 Webhook、Review 和处理结果；
+- 重试失败任务；
+- 手动触发当前提交的 Review；
+- 查看服务处理指标。
+
+## 共存部署：oh-my-robot + roboomp
+
+当前仓库保留两个职责清晰的服务：
 
 ```text
-GET  /admin/events
-GET  /admin/events/{delivery_id}
-GET  /admin/reviews
-GET  /admin/metrics
-POST /admin/events/{delivery_id}/replay
-POST /admin/repos/{owner}/{repo}/pulls/{number}/review
+oh-my-robot
+  -> Pull Request Review
+
+roboomp
+  -> Issue/PR 对话
+  -> 维护者授权的复现、测试、修复和 Draft PR
 ```
 
-请求鉴权：
-
-```http
-Authorization: Bearer <ROBOT_ADMIN_TOKEN>
-```
-
-- 事件、Review 查询支持筛选和 cursor 分页；
-- Replay 只允许 `failed`、`skipped`、`superseded`；
-- Replay 和人工触发支持 `Idempotency-Key`；
-- Manual Review 会重新读取当前 head SHA；
-- 支持含 `/` 的 delivery ID 详情和 Replay；
-- Admin 不返回 Token、Secret、完整 Diff 或模型原始响应。
-
-### 可观测性
-
-- JSON 结构化日志；
-- Webhook、Job、GitHub 请求、模型请求、评论发布、OMP 会话和 Admin 操作事件；
-- GitHub/model 错误分类；
-- 模型输入/输出 Token 统计；
-- GitHub、模型耗时统计；
-- Diff 文件数、Diff 字节数、不可评审文件数；
-- finding 数量、Review 等级分布；
-- `/admin/metrics` 聚合队列、重试、错误和 Review 指标。
-
-### OMP 只读深度模式（可选）
-
-默认仍为 `ROBOT_REVIEW_MODE=fast`。深度模式需要安装可选依赖并提供外部沙箱：
-
-```bash
-python -m pip install -e ".[dev,deep]"
-```
-
-配置 `ROBOT_OMP_SANDBOXED=true` 后，再切换：
-
-```text
-ROBOT_REVIEW_MODE=deep
-ROBOT_OMP_COMMAND=omp
-ROBOT_OMP_MODEL=你的模型 ID
-```
-
-深度模式会下载当前 PR head 的 GitHub 归档，在临时目录中启动 `omp --mode rpc`，只开放：
-
-```text
-read / glob / grep / lsp
-```
-
-深度模式不会修改文件、执行 Bash、Push 或写入 GitHub。无法使用 OMP 时应继续使用默认的 `fast` 模式。
-
-### roboomp 共存适配（Issue / PR 对话 / Fix）
-
-当前仓库不复制 roboomp 的写操作运行时。部署两个服务：
-
-```text
-GitHub Webhook
-  -> oh-my-robot:8090
-       Pull Request 事件 -> Fast/Deep Review
-       Issue/PR 评论事件 -> ROBOT_ROBOOMP_WEBHOOK_URL
-  -> roboomp:6543
-       Issue 对话、只读命令、人工授权修复、测试、Draft PR
-```
-
-配置：
+GitHub Webhook 统一发送到 oh-my-robot。配置 `ROBOT_ROBOOMP_WEBHOOK_URL` 后，Issue、PR 评论和 PR Review 事件会转发给 roboomp；不配置时，这些事件会被跳过。
 
 ```text
 ROBOT_ROBOOMP_WEBHOOK_URL=http://127.0.0.1:6543/webhook/github
 ROBOT_ROBOOMP_TIMEOUT_SECONDS=15
 ```
 
-roboomp 应使用与当前 GitHub Webhook 相同的 Secret，并按其部署文档运行 `gh-proxy`、隔离工作区和 OMP。当前适配层只转发显式允许的 GitHub Webhook 头和原始 JSON body，不转发 GitHub Token。未配置 URL 时，Issue/PR 对话事件会安全跳过。
+roboomp 需要单独部署，并使用与当前 Webhook 相同的 Secret。oh-my-robot 不转发 GitHub Token。
+
+## 可选模式配置
+
+### Deep Review
+
+默认使用 Fast Review。需要跨文件理解时，可以安装 Deep Review 依赖并配置：
+
+```bash
+python -m pip install -e ".[dev,deep]"
+```
+
+```text
+ROBOT_REVIEW_MODE=deep
+ROBOT_OMP_COMMAND=omp
+ROBOT_OMP_MODEL=你的模型 ID
+ROBOT_OMP_SANDBOXED=true
+```
+
+Deep Review 只提供评审意见，不修改代码。配置不完整或 OMP 不可用时，使用默认 Fast Review。
 
 ## Webhook 配置
 
@@ -277,21 +220,11 @@ roboomp 应使用与当前 GitHub Webhook 相同的 Secret，并按其部署文�
 
 建议使用限定仓库的 fine-grained token。Token 需要能够读取目标仓库的 Pull Request 信息和 Diff，并创建 PR Issue Comment；roboomp 的写操作权限按其部署文档单独配置。
 
-## 技术链路
+## 评审范围定制
 
-```text
-GitHub Webhook
-  -> FastAPI 验签
-  -> Pull Request 事件：WorkerPool -> GitHub Diff -> Fast/Deep Review -> 评论、行级评论、Check Run
-  -> Issue/PR 对话事件：显式头转发 -> roboomp -> Issue 对话或授权修复
-  -> SQLite 记录事件、Review、finding、OMP 审计
-```
+部署者可以为所有 PR、指定仓库或指定路径增加评审要求。效果会体现在 Review 评论中的问题和建议；规则文件由服务端受信任地挂载，不读取 PR 分支中的规则文件。
 
-## 自定义评审规则
-
-默认读取 `ROBOT_REVIEW_RULE_FILE`（默认 `review-rules.md`）和 `ROBOT_REVIEW_PATH_RULE_FILE`（默认 `review-rules.toml`）。规则文件必须由部署者从受信任来源挂载，不能直接读取 PR 新提交中的规则文件。
-
-`review-rules.toml` 支持全局、仓库和路径规则：
+配置文件：`review-rules.toml`
 
 ```toml
 rules = "全局规则"
@@ -308,11 +241,10 @@ rules = "保持该仓库的公开 API 兼容"
 - GitHub Token、Webhook Secret、Admin Token 和 DeepSeek Key 只存在服务端环境；
 - GitHub Token 不进入 URL 查询参数；
 - PR 描述、代码、README、注释和 Diff 都按不可信数据处理；
-- Fast/Deep Review 不 Clone、不执行、不修改 PR 代码；
-- Fast/Deep Review 不 Push、不批准、不拒绝、不合并；
+- Fast/Deep Review 不修改代码、不 Push、不批准、不拒绝、不合并；
 - 默认只发布评审评论，不自动阻断合并；
-- 错误日志、SQLite 错误字段和 Admin 响应进行敏感信息脱敏；
-- OMP 深度模式只读；roboomp 写操作必须经过其自身授权、工作区和 Git gate。
+- 错误日志、数据库错误字段和 Admin 响应进行敏感信息脱敏；
+- OMP 深度模式只读；roboomp 写操作必须经过自身授权、工作区和 Git gate。
 
 ## 配置参考
 
