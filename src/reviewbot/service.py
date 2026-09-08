@@ -11,6 +11,7 @@ from reviewbot.deepseek_client import DeepSeekApiError
 from reviewbot.diff import build_diff_context
 from reviewbot.github_client import GitHubApiError
 from reviewbot.models import ReviewJob
+from reviewbot.omp_worker import OmpReadOnlyReviewer, OmpReviewError
 from reviewbot.ports import GitHubPort, ReviewPort
 from reviewbot.renderer import render_review, review_marker
 from reviewbot.reviewer import ReviewExecution, ReviewFormatError
@@ -36,7 +37,9 @@ class ReviewService:
         *,
         store: QueueStore,
         github: GitHubPort,
-        engine: ReviewPort,
+        engine: ReviewPort | None,
+        deep_reviewer: OmpReadOnlyReviewer | None = None,
+        review_mode: str = "fast",
         rule_file: Path,
         max_diff_bytes: int,
         max_review_bytes: int,
@@ -46,6 +49,8 @@ class ReviewService:
         self._store = store
         self._github = github
         self._engine = engine
+        self._deep_reviewer = deep_reviewer
+        self._review_mode = review_mode
         self._rule_file = rule_file
         self._max_diff_bytes = max_diff_bytes
         self._max_review_bytes = max_review_bytes
@@ -134,10 +139,30 @@ class ReviewService:
         github_duration_ms += elapsed
         diff = build_diff_context(changed_files, self._max_diff_bytes)
         rules = load_rules(self._rule_file)
+        archive: bytes | None = None
+        if self._review_mode == "deep":
+            if self._deep_reviewer is None:
+                raise RuntimeError("deep review mode is not configured")
+            download_archive = getattr(self._github, "download_pull_request_archive", None)
+            if not callable(download_archive):
+                raise RuntimeError("GitHub client does not support PR archives")
+            archive, elapsed = await _timed_github(
+                job.delivery_id,
+                "download_pull_request_archive",
+                download_archive(pull_request.repository, pull_request.head_sha),
+            )
+            github_duration_ms += elapsed
         model_started = time.perf_counter()
         review_with_metadata = getattr(self._engine, "review_with_metadata", None)
         try:
-            if callable(review_with_metadata):
+            if self._review_mode == "deep":
+                execution = await self._deep_reviewer.review_with_metadata(
+                    pull_request,
+                    diff,
+                    rules,
+                    archive,
+                )
+            elif callable(review_with_metadata):
                 execution = await review_with_metadata(pull_request, diff, rules)
             else:
                 execution = ReviewExecution(await self._engine.review(pull_request, diff, rules))
@@ -312,6 +337,8 @@ class ReviewService:
 
     @staticmethod
     def is_retryable(error: Exception) -> bool:
+        if isinstance(error, OmpReviewError):
+            return error.retryable
         if isinstance(error, ReviewFormatError):
             return False
         if isinstance(error, GitHubApiError):

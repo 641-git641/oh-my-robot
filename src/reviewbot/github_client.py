@@ -67,6 +67,42 @@ class GitHubClient:
     async def close(self) -> None:
         await self._client.aclose()
 
+    async def download_pull_request_archive(
+        self,
+        repository: str,
+        head_sha: str,
+        *,
+        max_bytes: int = 50_000_000,
+    ) -> bytes:
+        owner, name = self._split_repository(repository)
+        path = f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/zipball/{quote(head_sha, safe='')}"
+        try:
+            async with self._client.stream("GET", path.lstrip("/")) as response:
+                if response.is_error:
+                    await response.aread()
+                    message = _error_message(response)
+                    retry_after, rate_limit_remaining, rate_limit_reset = _rate_limit_metadata(response)
+                    raise GitHubApiError(
+                        "GET",
+                        path,
+                        response.status_code,
+                        message,
+                        retry_after=retry_after,
+                        rate_limited=_is_rate_limited(response, message),
+                        rate_limit_remaining=rate_limit_remaining,
+                        rate_limit_reset=rate_limit_reset,
+                    )
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise GitHubApiError("GET", path, 413, "archive exceeds size limit")
+                    chunks.append(chunk)
+                return b"".join(chunks)
+        except httpx.HTTPError as exc:
+            raise GitHubApiError("GET", path, 0, "network error") from exc
+
     async def get_pull_request(self, repository: str, number: int) -> PullRequest:
         path = self._pull_path(repository, number)
         payload = await self._request("GET", path)

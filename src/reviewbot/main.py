@@ -14,6 +14,7 @@ from reviewbot.config import Settings, get_settings
 from reviewbot.deepseek_client import DeepSeekClient
 from reviewbot.github_client import GitHubClient
 from reviewbot.logging_config import configure_logging
+from reviewbot.omp_worker import OmpReadOnlyReviewer
 from reviewbot.reviewer import ReviewEngine
 from reviewbot.service import ReviewService
 from reviewbot.storage import QueueStore
@@ -40,8 +41,15 @@ def create_app(
         timeout_seconds=runtime.request_timeout_seconds,
     )
     deepseek = None
+    deep_reviewer = None
     review_engine = engine
-    if review_engine is None:
+    if runtime.review_mode == "deep":
+        deep_reviewer = OmpReadOnlyReviewer(
+            command=runtime.omp_command,
+            model=runtime.omp_model,
+            timeout_seconds=runtime.deep_review_timeout_seconds,
+        )
+    elif review_engine is None:
         deepseek = DeepSeekClient(
             base_url=runtime.deepseek_base_url,
             api_key=runtime.deepseek_api_key.get_secret_value(),  # type: ignore[union-attr]
@@ -57,6 +65,8 @@ def create_app(
         store=queue_store,
         github=github,
         engine=review_engine,
+        deep_reviewer=deep_reviewer,
+        review_mode=runtime.review_mode,
         rule_file=runtime.review_rule_file,
         max_diff_bytes=runtime.max_diff_bytes,
         max_review_bytes=runtime.max_review_bytes,

@@ -143,6 +143,30 @@ Authorization: Bearer <ROBOT_ADMIN_TOKEN>
 - finding 数量、Review 等级分布；
 - `/admin/metrics` 聚合队列、重试、错误和 Review 指标。
 
+### OMP 只读深度模式（可选）
+
+默认仍为 `ROBOT_REVIEW_MODE=fast`。深度模式需要安装可选依赖并提供外部沙箱：
+
+```bash
+python -m pip install -e ".[dev,deep]"
+```
+
+配置 `ROBOT_OMP_SANDBOXED=true` 后，再切换：
+
+```text
+ROBOT_REVIEW_MODE=deep
+ROBOT_OMP_COMMAND=omp
+ROBOT_OMP_MODEL=你的模型 ID
+```
+
+深度模式会下载当前 PR head 的 GitHub 归档，在临时目录中启动 `omp --mode rpc`，只开放：
+
+```text
+read / glob / grep / lsp
+```
+
+深度模式不会修改文件、执行 Bash、Push 或写入 GitHub。无法使用 OMP 时应继续使用默认的 `fast` 模式。
+
 ## Webhook 配置
 
 在 GitHub 仓库 `Settings -> Webhooks` 中配置：
@@ -159,7 +183,6 @@ Authorization: Bearer <ROBOT_ADMIN_TOKEN>
 ```text
 GitHub Pull Request Webhook
   -> FastAPI 验签、过滤和入队
-  -> SQLite durable queue
   -> WorkerPool 并发调度
   -> GitHub REST API 获取 PR 和 Diff
   -> DeepSeek 结构化评审
@@ -177,7 +200,7 @@ GitHub Pull Request Webhook
 - 不 Push、不批准、不拒绝、不合并；
 - 默认只发布评审评论，不自动阻断合并；
 - 错误日志、SQLite 错误字段和 Admin 响应进行敏感信息脱敏；
-- 只有明确的后续阶段设计才允许引入 OMP RPC 和自动修复。
+- OMP 深度模式只读；自动修复仍需后续人工授权设计。
 
 ## 自定义评审规则
 

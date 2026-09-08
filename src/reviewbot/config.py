@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     shutdown_drain_seconds: float = Field(25.0, alias="ROBOT_SHUTDOWN_DRAIN_SECONDS", ge=0, le=300)
     review_enabled: bool = Field(True, alias="ROBOT_REVIEW_ENABLED")
     admin_token: SecretStr | None = Field(None, alias="ROBOT_ADMIN_TOKEN")
+    review_mode: Literal["fast", "deep"] = Field("fast", alias="ROBOT_REVIEW_MODE")
+    omp_command: str = Field("omp", alias="ROBOT_OMP_COMMAND")
+    omp_model: str | None = Field(None, alias="ROBOT_OMP_MODEL")
+    deep_review_timeout_seconds: float = Field(300.0, alias="ROBOT_DEEP_REVIEW_TIMEOUT_SECONDS", gt=0, le=3_600)
+    omp_sandboxed: bool = Field(False, alias="ROBOT_OMP_SANDBOXED")
 
     @property
     def repo_allowlist(self) -> frozenset[str]:
@@ -58,10 +63,16 @@ class Settings(BaseSettings):
             missing.append("GITHUB_TOKEN")
         if self.github_webhook_secret is None or not self.github_webhook_secret.get_secret_value().strip():
             missing.append("GITHUB_WEBHOOK_SECRET")
-        if self.deepseek_api_key is None or not self.deepseek_api_key.get_secret_value().strip():
+        if self.review_mode == "fast" and (
+            self.deepseek_api_key is None or not self.deepseek_api_key.get_secret_value().strip()
+        ):
             missing.append("DEEPSEEK_API_KEY")
+        if self.review_mode == "deep" and not self.omp_command.strip():
+            missing.append("ROBOT_OMP_COMMAND")
         if not self.repo_allowlist:
             missing.append("GITHUB_REPO_ALLOWLIST")
+        if self.review_mode == "deep" and not self.omp_sandboxed:
+            missing.append("ROBOT_OMP_SANDBOXED=true")
         if missing:
             raise ValueError(f"missing required robot configuration: {', '.join(missing)}")
 
