@@ -119,7 +119,7 @@ def test_renderer_has_stable_marker_and_bounded_output() -> None:
 
     body = render_review(pull_request(), ReviewResult.model_validate(result_json), max_bytes=2_000)
 
-    assert "<!-- bh-ai-review:head-1 -->" in body
+    assert "<!-- oh-my-robot-review:head-1 -->" in body
     assert "src/auth.ts:1" in body
     assert "DeepSeek" in body
     assert len(body.encode()) <= 2_000

@@ -1,4 +1,4 @@
-"""Standalone Gitee Pull Request review bot."""
+"""Standalone GitHub Pull Request review bot."""
 
 __all__ = ["__version__"]
 

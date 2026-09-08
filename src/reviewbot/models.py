@@ -6,6 +6,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 Priority = Literal["P0", "P1", "P2", "P3"]
 ReviewVerdict = Literal["clean", "needs_attention"]
+EventState = Literal["queued", "running", "succeeded", "failed", "skipped", "superseded"]
+EventSource = Literal["webhook", "refresh", "replay", "manual"]
 
 
 class PullRequest(BaseModel):
@@ -65,6 +67,38 @@ class PullRequestComment(BaseModel):
 
     id: int
     body: str = ""
+
+
+class EventRecord(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    delivery_id: str
+    event_type: str
+    action: str
+    repository: str
+    pull_request_number: int = Field(gt=0)
+    webhook_head_sha: str = ""
+    state: EventState
+    attempts: int = Field(ge=0)
+    last_error: str | None = None
+    error_type: str | None = None
+    source: EventSource
+    source_delivery_id: str | None = None
+    available_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class ReviewRecord(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    repository: str
+    pull_request_number: int = Field(gt=0)
+    head_sha: str
+    comment_id: int | None = None
+    created_at: str
 
 
 class ReviewJob(BaseModel):

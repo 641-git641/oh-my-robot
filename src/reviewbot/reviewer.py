@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Protocol
 
 from pydantic import ValidationError
 
+from reviewbot.deepseek_client import CompletionResult, DeepSeekApiError
 from reviewbot.diff import DiffContext
 from reviewbot.models import PullRequest, ReviewFinding, ReviewResult
 
@@ -18,8 +20,24 @@ class CompletionProvider(Protocol):
     async def complete(self, messages: Sequence[Mapping[str, str]], *, max_tokens: int = 4_096) -> str: ...
 
 
+@dataclass(frozen=True, slots=True)
+class ReviewExecution:
+    result: ReviewResult
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
 class ReviewFormatError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
 
 
 class ReviewEngine:
@@ -30,6 +48,15 @@ class ReviewEngine:
         self._format_retries = format_retries
 
     async def review(self, pull_request: PullRequest, diff: DiffContext, rules: str) -> ReviewResult:
+        execution = await self.review_with_metadata(pull_request, diff, rules)
+        return execution.result
+
+    async def review_with_metadata(
+        self,
+        pull_request: PullRequest,
+        diff: DiffContext,
+        rules: str,
+    ) -> ReviewExecution:
         system_prompt = _system_prompt()
         user_prompt = _user_prompt(pull_request, diff, rules)
         messages: list[dict[str, str]] = [
@@ -37,9 +64,30 @@ class ReviewEngine:
             {"role": "user", "content": user_prompt},
         ]
         last_error: ValidationError | json.JSONDecodeError | None = None
+        input_tokens = 0
+        output_tokens = 0
+        input_seen = False
+        output_seen = False
 
         for attempt in range(self._format_retries + 1):
-            content = await self._provider.complete(messages, max_tokens=4_096)
+            try:
+                completion = await self._complete(messages)
+            except DeepSeekApiError as exc:
+                exc.input_tokens = input_tokens if input_seen else None
+                exc.output_tokens = output_tokens if output_seen else None
+                raise
+            except Exception:
+                raise
+            if isinstance(completion, CompletionResult):
+                content = completion.content
+                if completion.input_tokens is not None:
+                    input_tokens += completion.input_tokens
+                    input_seen = True
+                if completion.output_tokens is not None:
+                    output_tokens += completion.output_tokens
+                    output_seen = True
+            else:
+                content = completion
             try:
                 result = _parse_result(content)
             except (ValidationError, json.JSONDecodeError) as exc:
@@ -48,11 +96,38 @@ class ReviewEngine:
                     break
                 messages = _repair_messages(system_prompt, user_prompt, content)
                 continue
-            return normalize_result(result, diff)
+            return ReviewExecution(
+                normalize_result(result, diff),
+                input_tokens if input_seen else None,
+                output_tokens if output_seen else None,
+            )
 
-        detail = str(last_error) if last_error else "unknown response format"
-        raise ReviewFormatError(f"DeepSeek response did not match review schema: {detail}")
+        detail = _safe_format_error(last_error)
+        raise ReviewFormatError(
+            f"DeepSeek response did not match review schema: {detail}",
+            input_tokens=input_tokens if input_seen else None,
+            output_tokens=output_tokens if output_seen else None,
+        )
 
+    async def _complete(
+        self,
+        messages: Sequence[Mapping[str, str]],
+    ) -> str | CompletionResult:
+        complete_with_usage = getattr(self._provider, "complete_with_usage", None)
+        if callable(complete_with_usage):
+            return await complete_with_usage(messages, max_tokens=4_096)
+        return await self._provider.complete(messages, max_tokens=4_096)
+
+def _safe_format_error(error: ValidationError | json.JSONDecodeError | None) -> str:
+    if isinstance(error, ValidationError):
+        locations = [
+            f"{'.'.join(str(item) for item in detail.get('loc', ())) }:{detail.get('type', 'invalid')}"
+            for detail in error.errors()
+        ]
+        return f"schema validation failed at {', '.join(locations)[:400]}"
+    if isinstance(error, json.JSONDecodeError):
+        return "invalid JSON response"
+    return "invalid response format"
 
 def normalize_result(result: ReviewResult, diff: DiffContext) -> ReviewResult:
     valid_findings: list[ReviewFinding] = []

@@ -1,7 +1,7 @@
 services:
-  gitee-review-bot:
+  github-review-bot:
     build: .
-    container_name: bh-gitee-review-bot
+    container_name: oh-my-robot
     restart: unless-stopped
     env_file:
       - .env

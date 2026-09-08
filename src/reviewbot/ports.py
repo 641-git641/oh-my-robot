@@ -6,7 +6,7 @@ from reviewbot.diff import DiffContext
 from reviewbot.models import ChangedFile, PullRequest, PullRequestComment, ReviewResult
 
 
-class GiteePort(Protocol):
+class GitHubPort(Protocol):
     async def get_pull_request(self, repository: str, number: int) -> PullRequest: ...
 
     async def list_pull_request_files(self, repository: str, number: int) -> list[ChangedFile]: ...

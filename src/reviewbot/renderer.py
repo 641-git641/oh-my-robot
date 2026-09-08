@@ -9,7 +9,7 @@ _PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 
 
 def review_marker(head_sha: str) -> str:
-    return f"<!-- bh-ai-review:{head_sha} -->"
+    return f"<!-- oh-my-robot-review:{head_sha} -->"
 
 
 def render_review(pull_request: PullRequest, result: ReviewResult, *, max_bytes: int) -> str:

@@ -8,7 +8,7 @@ from reviewbot.service import ReviewService
 from reviewbot.storage import QueueStore
 
 
-class FakeGitee:
+class FakeGitHub:
     def __init__(self) -> None:
         self.comments: list[tuple[str, int, str]] = []
 
@@ -50,10 +50,10 @@ class FakeEngine:
 async def test_service_is_independent_from_fastapi_and_is_idempotent(tmp_path: Path) -> None:
     store = QueueStore(tmp_path / "reviews.sqlite3")
     store.initialize()
-    gitee = FakeGitee()
+    github = FakeGitHub()
     service = ReviewService(
         store=store,
-        gitee=gitee,  # type: ignore[arg-type]
+        github=github,  # type: ignore[arg-type]
         engine=FakeEngine(),  # type: ignore[arg-type]
         rule_file=tmp_path / "rules.md",
         max_diff_bytes=10_000,
@@ -74,9 +74,12 @@ async def test_service_is_independent_from_fastapi_and_is_idempotent(tmp_path: P
     assert claimed is not None
     await service.process(claimed[0])
 
-    assert len(gitee.comments) == 1
+    assert len(github.comments) == 1
     assert store.event_state("delivery-1") == "succeeded"
     assert store.has_review("owner/repo", 1, "head-1")
+    metrics = store.metrics()
+    assert metrics["reviewMetrics"]["reviewCount"] == 1
+    assert metrics["reviewMetrics"]["diffFileCount"] == 1
 
     duplicate = ReviewJob(
         delivery_id="delivery-2",
@@ -89,5 +92,5 @@ async def test_service_is_independent_from_fastapi_and_is_idempotent(tmp_path: P
     claimed_duplicate = store.claim_next()
     assert claimed_duplicate is not None
     await service.process(claimed_duplicate[0])
-    assert len(gitee.comments) == 1
+    assert len(github.comments) == 1
     assert store.event_state("delivery-2") == "skipped"

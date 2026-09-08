@@ -1,4 +1,5 @@
 import json
+
 import httpx
 import pytest
 
@@ -96,3 +97,31 @@ async def test_deepseek_client_composes_with_review_engine() -> None:
 
     assert result.rank == "P1"
     assert result.findings[0].path == "src/example.ts"
+
+
+@pytest.mark.asyncio
+async def test_deepseek_client_exposes_token_usage_without_shared_state() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"summary":"clean"}'}}],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 7},
+            },
+        )
+
+    client = DeepSeekClient(
+        base_url="https://api.deepseek.com",
+        api_key="runtime-only-key",
+        model="deepseek-chat",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await client.complete_with_usage([{"role": "user", "content": "review"}])
+    finally:
+        await client.close()
+
+    assert result.content == '{"summary":"clean"}'
+    assert result.input_tokens == 11
+    assert result.output_tokens == 7

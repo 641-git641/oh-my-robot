@@ -27,6 +27,9 @@ def build_diff_context(files: list[ChangedFile], max_bytes: int) -> DiffContext:
     for changed_file in files:
         lines = parse_changed_lines(changed_file.patch)
         changed_lines[changed_file.filename] = frozenset(lines)
+        if not changed_file.patch:
+            omitted.append(changed_file.filename)
+            continue
         section = _render_file(changed_file)
         encoded_size = len(section.encode("utf-8"))
         if used + encoded_size > max_bytes:
@@ -71,5 +74,5 @@ def _render_file(changed_file: ChangedFile) -> str:
         f"diff -- {changed_file.filename}\n"
         f"status: {changed_file.status}; additions: {changed_file.additions}; deletions: {changed_file.deletions}\n"
     )
-    patch = changed_file.patch or "[No patch was supplied by Gitee for this file.]"
+    patch = changed_file.patch or "[No patch was supplied by GitHub for this file.]"
     return f"\n{metadata}{patch}\n"

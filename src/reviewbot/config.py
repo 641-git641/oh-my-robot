@@ -7,8 +7,6 @@ from typing import Literal
 from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-AuthMode = Literal["query", "header"]
-
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -18,12 +16,10 @@ class Settings(BaseSettings):
         case_sensitive=False,
         populate_by_name=True,
     )
-    gitee_api_base_url: AnyHttpUrl = Field("https://gitee.com/api/v5", alias="GITEE_API_BASE_URL")
-    gitee_api_token: SecretStr | None = Field(None, alias="GITEE_API_TOKEN")
-    gitee_webhook_secret: SecretStr | None = Field(None, alias="GITEE_WEBHOOK_SECRET")
-    gitee_repo_allowlist_raw: str = Field("", alias="GITEE_REPO_ALLOWLIST")
-    gitee_auth_mode: AuthMode = Field("query", alias="GITEE_AUTH_MODE")
-    gitee_bot_login: str | None = Field(None, alias="GITEE_BOT_LOGIN")
+    github_api_base_url: AnyHttpUrl = Field("https://api.github.com", alias="GITHUB_API_BASE_URL")
+    github_token: SecretStr | None = Field(None, alias="GITHUB_TOKEN")
+    github_webhook_secret: SecretStr | None = Field(None, alias="GITHUB_WEBHOOK_SECRET")
+    github_repo_allowlist_raw: str = Field("", alias="GITHUB_REPO_ALLOWLIST")
 
     deepseek_api_base_url: AnyHttpUrl = Field("https://api.deepseek.com", alias="DEEPSEEK_API_BASE_URL")
     deepseek_api_key: SecretStr | None = Field(None, alias="DEEPSEEK_API_KEY")
@@ -39,15 +35,18 @@ class Settings(BaseSettings):
     max_review_bytes: int = Field(50_000, alias="ROBOT_MAX_REVIEW_BYTES", gt=0)
     request_timeout_seconds: float = Field(90.0, alias="ROBOT_REQUEST_TIMEOUT_SECONDS", gt=0)
     max_retries: int = Field(2, alias="ROBOT_MAX_RETRIES", ge=0, le=5)
+    max_concurrency: int = Field(4, alias="ROBOT_MAX_CONCURRENCY", ge=1, le=32)
+    shutdown_drain_seconds: float = Field(25.0, alias="ROBOT_SHUTDOWN_DRAIN_SECONDS", ge=0, le=300)
     review_enabled: bool = Field(True, alias="ROBOT_REVIEW_ENABLED")
+    admin_token: SecretStr | None = Field(None, alias="ROBOT_ADMIN_TOKEN")
 
     @property
     def repo_allowlist(self) -> frozenset[str]:
-        return frozenset(item.strip().lower() for item in self.gitee_repo_allowlist_raw.split(",") if item.strip())
+        return frozenset(item.strip().lower() for item in self.github_repo_allowlist_raw.split(",") if item.strip())
 
     @property
     def api_base_url(self) -> str:
-        return str(self.gitee_api_base_url).rstrip("/")
+        return str(self.github_api_base_url).rstrip("/")
 
     @property
     def deepseek_base_url(self) -> str:
@@ -55,14 +54,14 @@ class Settings(BaseSettings):
 
     def validate_runtime(self) -> None:
         missing: list[str] = []
-        if self.gitee_api_token is None or not self.gitee_api_token.get_secret_value().strip():
-            missing.append("GITEE_API_TOKEN")
-        if self.gitee_webhook_secret is None or not self.gitee_webhook_secret.get_secret_value().strip():
-            missing.append("GITEE_WEBHOOK_SECRET")
+        if self.github_token is None or not self.github_token.get_secret_value().strip():
+            missing.append("GITHUB_TOKEN")
+        if self.github_webhook_secret is None or not self.github_webhook_secret.get_secret_value().strip():
+            missing.append("GITHUB_WEBHOOK_SECRET")
         if self.deepseek_api_key is None or not self.deepseek_api_key.get_secret_value().strip():
             missing.append("DEEPSEEK_API_KEY")
         if not self.repo_allowlist:
-            missing.append("GITEE_REPO_ALLOWLIST")
+            missing.append("GITHUB_REPO_ALLOWLIST")
         if missing:
             raise ValueError(f"missing required robot configuration: {', '.join(missing)}")
 

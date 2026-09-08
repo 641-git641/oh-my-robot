@@ -7,15 +7,15 @@ from reviewbot.config import Settings
 def test_runtime_configuration_requires_all_external_credentials() -> None:
     settings = Settings()
 
-    with pytest.raises(ValueError, match="GITEE_API_TOKEN"):
+    with pytest.raises(ValueError, match="GITHUB_TOKEN"):
         settings.validate_runtime()
 
 
 def test_runtime_configuration_accepts_named_fields_and_normalizes_repositories() -> None:
     settings = Settings(
-        gitee_api_token=SecretStr("gitee"),
-        gitee_webhook_secret=SecretStr("webhook"),
-        gitee_repo_allowlist_raw=" Owner/Repo,owner/other ",
+        github_token=SecretStr("github"),
+        github_webhook_secret=SecretStr("webhook"),
+        github_repo_allowlist_raw=" Owner/Repo,owner/other ",
         deepseek_api_key=SecretStr("deepseek"),
     )
 

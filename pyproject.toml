@@ -3,9 +3,9 @@ requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "bh-gitee-review-bot"
+name = "oh-my-robot"
 version = "0.1.0"
-description = "Decoupled Gitee Pull Request review bot powered by DeepSeek"
+description = "GitHub Pull Request review bot powered by DeepSeek"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
@@ -23,7 +23,7 @@ dev = [
 ]
 
 [project.scripts]
-bh-review-bot = "reviewbot.main:main"
+oh-my-robot = "reviewbot.main:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

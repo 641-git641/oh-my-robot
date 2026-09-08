@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+
+@dataclass(frozen=True, slots=True)
+class CompletionResult:
+    content: str
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 class DeepSeekApiError(RuntimeError):
@@ -12,6 +20,8 @@ class DeepSeekApiError(RuntimeError):
         super().__init__(f"DeepSeek API failed with HTTP {status_code}: {message}")
         self.status_code = status_code
         self.message = message
+        self.input_tokens: int | None = None
+        self.output_tokens: int | None = None
 
 
 class DeepSeekClient:
@@ -39,7 +49,7 @@ class DeepSeekClient:
                 "Accept": "application/json",
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": "bh-gitee-review-bot/0.1",
+                "User-Agent": "oh-my-robot/0.1",
             },
             timeout=timeout_seconds,
             transport=transport,
@@ -49,6 +59,15 @@ class DeepSeekClient:
         await self._client.aclose()
 
     async def complete(self, messages: Sequence[Mapping[str, str]], *, max_tokens: int = 4_096) -> str:
+        result = await self.complete_with_usage(messages, max_tokens=max_tokens)
+        return result.content
+
+    async def complete_with_usage(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        max_tokens: int = 4_096,
+    ) -> CompletionResult:
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": list(messages),
@@ -88,7 +107,8 @@ class DeepSeekClient:
             content = _message_content(response_payload)
             if not content:
                 raise DeepSeekApiError(response.status_code, "response has no message content")
-            return content
+            input_tokens, output_tokens = _usage(response_payload)
+            return CompletionResult(content, input_tokens, output_tokens)
 
         raise DeepSeekApiError(500, "request exhausted retries")
 
@@ -109,6 +129,19 @@ def _message_content(payload: Any) -> str:
     if isinstance(content, str):
         return content.strip()
     return ""
+
+
+def _usage(payload: Any) -> tuple[int | None, int | None]:
+    usage = payload.get("usage") if isinstance(payload, Mapping) else None
+    if not isinstance(usage, Mapping):
+        return None, None
+    input_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+    output_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+    return _token_count(input_tokens), _token_count(output_tokens)
+
+
+def _token_count(value: Any) -> int | None:
+    return int(value) if isinstance(value, int) and value >= 0 else None
 
 
 def _retry_delay(attempt: int) -> float:

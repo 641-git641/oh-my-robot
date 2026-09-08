@@ -3,35 +3,40 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status
 
+from reviewbot.admin import register_admin_routes
 from reviewbot.config import Settings, get_settings
 from reviewbot.deepseek_client import DeepSeekClient
-from reviewbot.gitee_client import GiteeClient
+from reviewbot.github_client import GitHubClient
+from reviewbot.logging_config import configure_logging
 from reviewbot.reviewer import ReviewEngine
 from reviewbot.service import ReviewService
 from reviewbot.storage import QueueStore
 from reviewbot.webhook import WebhookError, is_pull_request_event, is_review_action, parse_review_job, verify_webhook
-from reviewbot.worker import ReviewWorker
+from reviewbot.worker import WorkerPool
+
+log = logging.getLogger(__name__)
 
 
 def create_app(
     settings: Settings | None = None,
     *,
-    gitee_client: GiteeClient | None = None,
+    github_client: GitHubClient | None = None,
     engine: ReviewEngine | None = None,
     store: QueueStore | None = None,
 ) -> FastAPI:
     runtime = settings or get_settings()
     runtime.validate_runtime()
+    configure_logging()
     queue_store = store or QueueStore(runtime.database_path)
-    gitee = gitee_client or GiteeClient(
+    github = github_client or GitHubClient(
         base_url=runtime.api_base_url,
-        token=runtime.gitee_api_token.get_secret_value(),  # type: ignore[union-attr]
-        auth_mode=runtime.gitee_auth_mode,
+        token=runtime.github_token.get_secret_value(),  # type: ignore[union-attr]
         timeout_seconds=runtime.request_timeout_seconds,
     )
     deepseek = None
@@ -50,7 +55,7 @@ def create_app(
 
     service = ReviewService(
         store=queue_store,
-        gitee=gitee,
+        github=github,
         engine=review_engine,
         rule_file=runtime.review_rule_file,
         max_diff_bytes=runtime.max_diff_bytes,
@@ -58,7 +63,7 @@ def create_app(
         allowlist=runtime.repo_allowlist,
         enabled=runtime.review_enabled,
     )
-    worker = ReviewWorker(store=queue_store, service=service, settings=runtime)
+    worker = WorkerPool(store=queue_store, service=service, settings=runtime)
     stop_event = asyncio.Event()
 
     @asynccontextmanager
@@ -71,21 +76,21 @@ def create_app(
             yield
         finally:
             stop_event.set()
-            task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-            close_gitee = getattr(gitee, "close", None)
-            if close_gitee is not None:
-                result = close_gitee()
+            close_github = getattr(github, "close", None)
+            if close_github is not None:
+                result = close_github()
                 if inspect.isawaitable(result):
                     await result
             if deepseek is not None:
                 await deepseek.close()
             app.state.ready = False
 
-    app = FastAPI(title="bh-gitee-review-bot", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="oh-my-robot", version="0.1.0", lifespan=lifespan)
     app.state.ready = False
     app.state.settings = runtime
     app.state.store = queue_store
+    register_admin_routes(app, settings=runtime, store=queue_store, github=github)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
@@ -97,40 +102,90 @@ def create_app(
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "robot is starting")
         return {"status": "ready", "queue": await asyncio.to_thread(queue_store.counts)}
 
-    @app.post("/webhook/gitee", status_code=status.HTTP_202_ACCEPTED)
-    async def gitee_webhook(request: Request) -> dict[str, Any]:
+    @app.post("/webhook/github", status_code=status.HTTP_202_ACCEPTED)
+    async def github_webhook(request: Request) -> dict[str, Any]:
+        delivery_id = request.headers.get("X-GitHub-Delivery") or ""
+        event_type = request.headers.get("X-GitHub-Event", "")
         body = await request.body()
+        log.info(
+            "webhook_received",
+            extra={
+                "delivery_id": delivery_id,
+                "event_type": event_type,
+                "body_bytes": len(body),
+            },
+        )
         if len(body) > runtime.max_diff_bytes * 2:
+            log.warning(
+                "webhook_rejected",
+                extra={"delivery_id": delivery_id, "event_type": event_type, "reason": "payload_too_large"},
+            )
             raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "webhook payload too large")
 
-        token_header = request.headers.get("X-Gitee-Token")
-        signature_header = request.headers.get("X-Gitee-Signature") or request.headers.get("X-Hub-Signature-256")
-        secret = runtime.gitee_webhook_secret.get_secret_value()  # type: ignore[union-attr]
-        if not verify_webhook(body, secret=secret, token_header=token_header, signature_header=signature_header):
+        signature_header = request.headers.get("X-Hub-Signature-256")
+        secret = runtime.github_webhook_secret.get_secret_value()  # type: ignore[union-attr]
+        if not verify_webhook(body, secret=secret, signature_header=signature_header):
+            log.warning(
+                "webhook_rejected",
+                extra={"delivery_id": delivery_id, "event_type": event_type, "reason": "invalid_signature"},
+            )
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid webhook signature")
 
-        event_type = request.headers.get("X-Gitee-Event", "pull_request")
         payload = _json_object(body)
         if not is_pull_request_event(event_type, payload):
+            log.info(
+                "webhook_skipped",
+                extra={"delivery_id": delivery_id, "event_type": event_type, "reason": "not_pull_request"},
+            )
             return {"state": "skipped", "reason": "not a Pull Request event"}
-
         try:
             job = parse_review_job(
                 body=body,
                 event_type=event_type,
-                delivery_id=request.headers.get("X-Gitee-Delivery") or request.headers.get("X-Request-Id"),
+                delivery_id=delivery_id,
             )
         except WebhookError as exc:
+            log.warning(
+                "webhook_rejected",
+                extra={"delivery_id": delivery_id, "event_type": event_type, "reason": "invalid_payload"},
+            )
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-
         if job.repository.lower() not in runtime.repo_allowlist:
+            log.info(
+                "webhook_skipped",
+                extra={
+                    "delivery_id": job.delivery_id,
+                    "repository": job.repository,
+                    "reason": "repository_not_allowlisted",
+                },
+            )
             return {"state": "skipped", "reason": "repository not allowlisted"}
         if not runtime.review_enabled:
+            log.info(
+                "webhook_skipped",
+                extra={"delivery_id": job.delivery_id, "repository": job.repository, "reason": "review_disabled"},
+            )
             return {"state": "skipped", "reason": "review disabled"}
         if not is_review_action(job.action):
+            log.info(
+                "webhook_skipped",
+                extra={"delivery_id": job.delivery_id, "repository": job.repository, "reason": "action_ignored"},
+            )
             return {"state": "skipped", "reason": f"action {job.action!r} ignored"}
 
+
         inserted = await asyncio.to_thread(queue_store.enqueue, job)
+        log.info(
+            "job_enqueued",
+            extra={
+                "delivery_id": job.delivery_id,
+                "repository": job.repository,
+                "pull_request": job.pull_request_number,
+                "action": job.action,
+                "webhook_head_sha": job.webhook_head_sha,
+                "state": "queued" if inserted else "duplicate",
+            },
+        )
         return {"state": "queued" if inserted else "duplicate", "deliveryId": job.delivery_id}
 
     return app
