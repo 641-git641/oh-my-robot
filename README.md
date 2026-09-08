@@ -72,6 +72,75 @@ Docker 服务默认监听 `8090`，并持久化：
 - `./data:/app/data`：SQLite 数据库；
 - `./review-rules.md:/app/review-rules.md:ro`：评审规则。
 
+## 部署方式
+
+### 本地开发部署
+
+适合调试 Webhook、Review Prompt 和 SQLite 状态：
+
+```bash
+python -m pip install -e ".[dev]"
+uvicorn reviewbot.main:create_app --factory --host 127.0.0.1 --port 8090
+```
+
+本地服务默认只监听 `127.0.0.1`，不会自动暴露到公网。需要接收 GitHub Webhook 时，使用反向代理或隧道将公网 HTTPS 请求转发到：
+
+```text
+POST http://127.0.0.1:8090/webhook/github
+```
+
+### Docker Compose 部署
+
+```bash
+docker compose up --build -d
+docker compose logs -f github-review-bot
+```
+
+停止服务：
+
+```bash
+docker compose down
+```
+
+Compose 会将服务运行在容器内，将 `./data` 作为 SQLite 持久化目录，并以只读方式挂载 `review-rules.md`。
+
+### 公网生产部署
+
+推荐结构：
+
+```text
+GitHub Webhook
+  -> HTTPS Reverse Proxy
+  -> /webhook/github
+  -> oh-my-robot:8090
+```
+
+部署要求：
+
+- Webhook 公网入口必须使用 HTTPS；
+- 只公开 `/webhook/github`；
+- `/healthz`、`/readyz` 和 `/admin/*` 建议限制为内网或可信来源；
+- `GITHUB_WEBHOOK_SECRET`、`GITHUB_TOKEN`、`DEEPSEEK_API_KEY` 不提交到 Git；
+- 持久化 `data/`，避免容器重启丢失队列和 Review 记录；
+- 使用 fine-grained GitHub Token，只授予目标仓库所需权限；
+- Admin 控制面必须配置独立的 `ROBOT_ADMIN_TOKEN`。
+
+生产部署前，建议创建一个无敏感信息的测试 PR，确认 Webhook 返回 `202`，并确认 PR 评论只出现一条。
+
+## 用户可感知的功能
+
+用户主要通过 GitHub PR 页面和可选 Admin 接口使用本项目：
+
+- 创建或更新 PR 后，机器人自动在 PR 评论区发布 AI Review；
+- 评论包含总体结论、P0～P3 问题、文件路径、新增行号、影响、修复建议、置信度和测试建议；
+- 同一个 PR 提交不会重复发布相同 Review；
+- PR 在评审期间产生新提交时，旧提交结论不会发布，机器人会继续评审最新 head；
+- Draft、关闭的 PR 或不在白名单的仓库不会产生 Review 评论；
+- 大型 Diff、二进制和 patchless 文件会在覆盖范围中明确标记，不会伪造问题；
+- 维护者可以通过 Admin API 查询事件、Review、指标，Replay 失败任务或手动触发当前 head Review；
+- 可选 Deep 模式可以使用 OMP 只读读取 PR 归档中的仓库文件，辅助跨文件分析；
+- 默认不会修改代码、Push 分支、创建 PR、批准、拒绝或合并代码。
+
 ## 目前已实现功能
 
 ### GitHub 接入
