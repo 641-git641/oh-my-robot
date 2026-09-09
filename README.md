@@ -188,7 +188,31 @@ ROBOT_ROBOOMP_WEBHOOK_URL=http://127.0.0.1:6543/webhook/github
 ROBOT_ROBOOMP_TIMEOUT_SECONDS=15
 ```
 
-roboomp 需要单独部署，并使用与当前 Webhook 相同的 Secret。oh-my-robot 不转发 GitHub Token。
+roboomp 源码已复制到当前仓库的 `src/robomp`，后续 Agent 能力在此基础上二开。roboomp 需要在具备 `omp`、Git 和 Linux 进程隔离能力的运行环境中单独启动；oh-my-robot 不转发 GitHub Token。
+
+## Agent 能力现状
+
+### 已接入
+
+- PR Review：Fast Review 和可选 Deep Review；
+- Issue/PR 评论转发；
+- roboomp 对话、维护者授权修复和 Draft PR 能力的共存入口。
+
+### 完整 Agent 使用前提
+
+要让用户实际使用 Issue/PR 对话和修复能力，还需要：
+
+1. 使用 `.env.roboomp.example` 准备 roboomp 配置；
+2. 从当前仓库源码启动 `roboomp serve`；
+3. 将 `ROBOT_ROBOOMP_WEBHOOK_URL` 指向 roboomp 的 Webhook；
+4. 在 GitHub Webhook 中启用 Pull Requests、Issue comments、Issues 和 Pull request reviews；
+5. 使用同一个 Webhook Secret，并在 roboomp 侧配置维护者授权和代码写入权限。
+
+```bash
+PYTHONPATH=src python -m robomp serve
+```
+
+完成后，用户可以在 Issue 或 PR 评论中请求解释、继续跟进、复现和测试；获得授权后，机器人才能修改代码并创建 Draft PR。未完成上述配置时，oh-my-robot 仍可独立提供 PR Review，但不会提供修复 Agent。
 
 ## 可选模式配置
 
