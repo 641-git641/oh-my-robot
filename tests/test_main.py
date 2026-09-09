@@ -118,3 +118,53 @@ async def test_webhook_forwards_roboomp_interaction_event(tmp_path: Path) -> Non
     assert forwarded[0].content == body
     assert forwarded[0].headers["x-github-event"] == "issue_comment"
     assert forwarded[0].headers["x-hub-signature-256"] == f"sha256={signature}"
+
+
+@pytest.mark.asyncio
+async def test_webhook_forwards_issue_event_to_local_roboomp(tmp_path: Path) -> None:
+    settings = Settings(
+        github_token=SecretStr("github-token"),
+        github_webhook_secret=SecretStr("webhook-secret"),
+        github_repo_allowlist_raw="owner/repo",
+        deepseek_api_key=SecretStr("deepseek-key"),
+        database_path=tmp_path / "robot.sqlite3",
+        roboomp_webhook_url="http://roboomp.test/webhook/github",
+    )
+    forwarded: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        forwarded.append(request)
+        return httpx.Response(202, json={"state": "queued"})
+
+    roboomp_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(
+        settings,
+        github_client=object(),
+        engine=object(),  # type: ignore[arg-type]
+        roboomp_client=roboomp_client,
+    )
+    body = (
+        b'{"action":"opened","repository":{"full_name":"owner/repo"},'
+        b'"issue":{"number":12,"title":"Login fails","user":{"login":"contributor"}}}'
+    )
+    signature = hmac.new(b"webhook-secret", body, hashlib.sha256).hexdigest()
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://robot") as client:
+            response = await client.post(
+                "/webhook/github",
+                content=body,
+                headers={
+                    "X-Hub-Signature-256": f"sha256={signature}",
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue-12",
+                },
+            )
+    finally:
+        await roboomp_client.aclose()
+
+    assert response.status_code == 202
+    assert response.json() == {"state": "forwarded", "target": "roboomp", "deliveryId": "delivery-issue-12"}
+    assert len(forwarded) == 1
+    assert forwarded[0].headers["x-github-event"] == "issues"
+    assert forwarded[0].headers["x-github-delivery"] == "delivery-issue-12"

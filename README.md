@@ -152,10 +152,11 @@ GitHub Webhook
 
 配置 roboomp 后，用户可以在 Issue 或 PR 评论中：
 
-- 请求解释问题或继续跟进评审；
-- 获取 Issue/PR 的对话式回复；
-- 在获得维护者授权后请求复现、测试和修复；
-- 查看机器人创建的 Draft PR。
+- 新建或重新打开 Issue 后，获得自动分类和处理回复；
+- 通过评论请求解释问题、补充信息或继续跟进；
+- 普通贡献者可以请求只读分析和问答；
+- 维护者可以通过 `@roboomp` 评论授权复现、测试和修复；
+- 修复完成后查看机器人创建的 Draft PR。
 
 授权修复由 roboomp 独立执行；未配置 roboomp 时，oh-my-robot 只处理 Pull Request Review。
 
