@@ -8,6 +8,10 @@
 
 面向 GitHub Pull Request 的 AI Review 服务：接收 Webhook，在 PR 评论区发布评审结果。默认只读；接入 roboomp 后，可为 Issue/PR 对话提供授权的修复流程。
 
+## PR 自动审查链路
+
+![PR 自动审查链路](pr-review-flow.svg)
+
 ## 快速启动
 
 ### 方式一：Python 本地启动

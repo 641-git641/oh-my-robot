@@ -1,0 +1,175 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
+  <title id="title">PR 自动审查链路</title>
+  <desc id="desc">Pull Request 进入 Webhook 后读取变更，选择 Fast 或 Deep Review，经 AI 分析、结果校验和行号定位，最终发布到 GitHub。下方展示可选的 roboomp Agent 对话与授权修复分支。</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#111c34"/>
+    </linearGradient>
+    <linearGradient id="hero" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#818cf8"/>
+    </linearGradient>
+    <linearGradient id="success" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#34d399"/>
+      <stop offset="1" stop-color="#22c55e"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#020617" flood-opacity="0.34"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#6f86aa"/>
+    </marker>
+    <marker id="arrowAccent" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#60a5fa"/>
+    </marker>
+    <style>
+      .font { font-family: "Microsoft YaHei", "Noto Sans SC", Arial, sans-serif; }
+      .title { fill: #f8fafc; font-size: 34px; font-weight: 700; letter-spacing: 1px; }
+      .subtitle { fill: #9fb0ca; font-size: 16px; }
+      .eyebrow { fill: #8ea4c6; font-size: 13px; font-weight: 700; letter-spacing: 1.5px; }
+      .card-title { fill: #f8fafc; font-size: 23px; font-weight: 700; }
+      .card-body { fill: #b7c4d9; font-size: 15px; }
+      .small { fill: #9fb0ca; font-size: 13px; }
+      .pill-text { fill: #dbeafe; font-size: 13px; font-weight: 700; }
+      .step { fill: #08111f; stroke: #223451; stroke-width: 1; }
+      .branch { fill: #101b31; stroke: #2f466a; stroke-width: 1; }
+      .output { fill: #102a2a; stroke: #2f806c; stroke-width: 1; }
+      .agent { fill: #211b36; stroke: #6650a4; stroke-width: 1; }
+      .connector { fill: none; stroke: #6f86aa; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#arrow); }
+      .connector-accent { fill: none; stroke: #60a5fa; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#arrowAccent); }
+      .connector-dashed { fill: none; stroke: #806bb8; stroke-width: 2.5; stroke-dasharray: 8 8; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#arrow); }
+      .label-bg { fill: #17243a; }
+      .label { fill: #a9bbd5; font-size: 13px; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1040" fill="url(#bg)"/>
+  <circle cx="1480" cy="80" r="220" fill="#1d4ed8" opacity="0.08"/>
+  <circle cx="80" cy="950" r="260" fill="#7c3aed" opacity="0.07"/>
+
+  <g class="font">
+    <text x="80" y="78" class="title">PR 自动审查链路</text>
+    <text x="80" y="112" class="subtitle">从 Pull Request 变更到 GitHub Review 结果 · 用户可见流程</text>
+    <rect x="1210" y="58" width="118" height="32" rx="16" fill="#12304a" stroke="#24547a"/>
+    <text x="1269" y="79" text-anchor="middle" class="pill-text">FAST REVIEW</text>
+    <rect x="1340" y="58" width="118" height="32" rx="16" fill="#241b49" stroke="#5a45a0"/>
+    <text x="1399" y="79" text-anchor="middle" class="pill-text">DEEP REVIEW</text>
+
+    <text x="80" y="162" class="eyebrow">PRIMARY REVIEW FLOW</text>
+
+    <!-- Main input and preparation steps -->
+    <g filter="url(#shadow)">
+      <rect x="80" y="200" width="250" height="150" rx="18" class="step"/>
+      <rect x="80" y="200" width="8" height="150" rx="4" fill="#38bdf8"/>
+      <text x="108" y="235" class="eyebrow">01 · 输入</text>
+      <text x="108" y="273" class="card-title">Pull Request</text>
+      <text x="108" y="304" class="card-body">创建、重新打开或更新 PR</text>
+      <text x="108" y="329" class="small">只处理当前 head 提交</text>
+
+      <rect x="400" y="200" width="250" height="150" rx="18" class="step"/>
+      <rect x="400" y="200" width="8" height="150" rx="4" fill="#60a5fa"/>
+      <text x="428" y="235" class="eyebrow">02 · 接收</text>
+      <text x="428" y="273" class="card-title">Webhook</text>
+      <text x="428" y="304" class="card-body">验证请求并确认目标仓库</text>
+      <text x="428" y="329" class="small">无效请求不会进入审查</text>
+
+      <rect x="720" y="200" width="250" height="150" rx="18" class="step"/>
+      <rect x="720" y="200" width="8" height="150" rx="4" fill="#818cf8"/>
+      <text x="748" y="235" class="eyebrow">03 · 准备</text>
+      <text x="748" y="273" class="card-title">读取变更</text>
+      <text x="748" y="304" class="card-body">获取 PR Diff 和相关规则</text>
+      <text x="748" y="329" class="small">大文件和不可读文件会标明</text>
+
+      <rect x="1040" y="200" width="300" height="150" rx="18" class="step"/>
+      <rect x="1040" y="200" width="8" height="150" rx="4" fill="#a78bfa"/>
+      <text x="1068" y="235" class="eyebrow">04 · 选择</text>
+      <text x="1068" y="273" class="card-title">Review 模式</text>
+      <text x="1068" y="304" class="card-body">Fast：快速检查变更</text>
+      <text x="1068" y="329" class="card-body">Deep：补充跨文件上下文</text>
+    </g>
+
+    <path d="M330 275 H400" class="connector"/>
+    <path d="M650 275 H720" class="connector"/>
+    <path d="M970 275 H1040" class="connector"/>
+
+    <!-- Branches -->
+    <rect x="805" y="414" width="330" height="160" rx="18" class="branch" filter="url(#shadow)"/>
+    <rect x="805" y="414" width="8" height="160" rx="4" fill="#38bdf8"/>
+    <text x="837" y="450" class="eyebrow">FAST REVIEW</text>
+    <text x="837" y="489" class="card-title">分析变更</text>
+    <text x="837" y="521" class="card-body">检查新增行、风险和测试建议</text>
+    <text x="837" y="548" class="small">适合日常 PR 快速反馈</text>
+
+    <rect x="1180" y="414" width="330" height="160" rx="18" class="branch" filter="url(#shadow)"/>
+    <rect x="1180" y="414" width="8" height="160" rx="4" fill="#a78bfa"/>
+    <text x="1212" y="450" class="eyebrow">DEEP REVIEW</text>
+    <text x="1212" y="489" class="card-title">跨文件分析</text>
+    <text x="1212" y="521" class="card-body">结合仓库上下文理解影响范围</text>
+    <text x="1212" y="548" class="small">只读，不修改代码</text>
+
+    <path d="M1190 350 C1190 382 970 382 970 414" class="connector-accent"/>
+    <path d="M1190 350 C1190 382 1345 382 1345 414" class="connector-dashed"/>
+    <rect x="1030" y="365" width="130" height="28" rx="14" class="label-bg"/>
+    <text x="1095" y="384" text-anchor="middle" class="label">按配置分流</text>
+
+    <!-- Validation and publishing -->
+    <rect x="930" y="650" width="390" height="150" rx="18" class="step" filter="url(#shadow)"/>
+    <rect x="930" y="650" width="8" height="150" rx="4" fill="#fbbf24"/>
+    <text x="962" y="687" class="eyebrow">05 · 校验</text>
+    <text x="962" y="726" class="card-title">结果校验与定位</text>
+    <text x="962" y="758" class="card-body">过滤无法定位的问题，确认文件和新增行</text>
+    <text x="962" y="784" class="small">避免发布不可验证的意见</text>
+
+    <path d="M970 574 C970 610 1050 610 1050 650" class="connector"/>
+    <path d="M1345 574 C1345 610 1200 610 1200 650" class="connector"/>
+
+    <rect x="930" y="860" width="390" height="120" rx="18" class="output" filter="url(#shadow)"/>
+    <rect x="930" y="860" width="8" height="120" rx="4" fill="url(#success)"/>
+    <text x="962" y="897" class="eyebrow">06 · 发布</text>
+    <text x="962" y="936" class="card-title">回写 GitHub</text>
+    <text x="962" y="965" class="card-body">汇总评论 · 行级评论 · Check Run</text>
+    <path d="M1125 800 V860" class="connector-accent"/>
+
+    <rect x="1370" y="840" width="180" height="160" rx="18" class="output" filter="url(#shadow)"/>
+    <text x="1400" y="878" class="eyebrow">07 · 用户看到</text>
+    <text x="1400" y="920" class="card-title">Review 结果</text>
+    <text x="1400" y="952" class="card-body">问题等级</text>
+    <text x="1400" y="976" class="card-body">代码位置</text>
+    <text x="1400" y="1000" class="card-body">修复建议</text>
+    <path d="M1320 920 H1370" class="connector-accent"/>
+
+    <!-- Optional Agent branch -->
+    <text x="80" y="400" class="eyebrow">OPTIONAL AGENT WORKFLOW</text>
+    <rect x="80" y="430" width="210" height="130" rx="18" class="agent"/>
+    <text x="106" y="466" class="eyebrow">评论触发</text>
+    <text x="106" y="503" class="card-title">Issue / PR 评论</text>
+    <text x="106" y="535" class="card-body">解释、补充、继续跟进</text>
+
+    <rect x="330" y="430" width="210" height="130" rx="18" class="agent"/>
+    <text x="356" y="466" class="eyebrow">Agent</text>
+    <text x="356" y="503" class="card-title">roboomp</text>
+    <text x="356" y="535" class="card-body">对话式分析和任务处理</text>
+
+    <rect x="580" y="430" width="210" height="130" rx="18" class="agent"/>
+    <text x="606" y="466" class="eyebrow">授权后</text>
+    <text x="606" y="503" class="card-title">Draft PR</text>
+    <text x="606" y="535" class="card-body">复现、测试、修复</text>
+    <text x="606" y="557" class="small">并提交草稿 PR</text>
+
+    <path d="M290 495 H330" class="connector-dashed"/>
+    <path d="M540 495 H580" class="connector-dashed"/>
+    <path d="M525 350 V430" class="connector-dashed"/>
+    <rect x="80" y="590" width="710" height="34" rx="17" fill="#17152a" stroke="#4c3d78"/>
+    <text x="435" y="612" text-anchor="middle" class="small">Agent 写操作必须经过维护者授权；默认 Review 不修改代码</text>
+
+    <!-- Footer legend -->
+    <line x1="80" y1="1010" x2="1520" y2="1010" stroke="#263956"/>
+    <circle cx="95" cy="1030" r="5" fill="#60a5fa"/>
+    <text x="108" y="1035" class="small">主审查链路</text>
+    <circle cx="250" cy="1030" r="5" fill="#806bb8"/>
+    <text x="263" y="1035" class="small">可选 Agent 分支</text>
+    <text x="1520" y="1035" text-anchor="end" class="small">oh-my-robot · user-visible flow</text>
+  </g>
+</svg>
